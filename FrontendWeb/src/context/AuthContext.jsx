@@ -7,6 +7,7 @@ const AuthContext = createContext();
 export const useAuth = () => useContext(AuthContext);
 
 export const AuthProvider = ({ children }) => {
+    const API_BASE = import.meta.env.VITE_API_URL;
     const [user, setUser] = useState(null);
     const [keys, setKeys] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -14,7 +15,7 @@ export const AuthProvider = ({ children }) => {
     useEffect(() => {
         // On page refresh: restore session if password is in sessionStorage
         const storedUser = localStorage.getItem('prama_auth_user');
-        const sessionPwd = sessionStorage.getItem('session_pwd');
+        const sessionPwd = localStorage.getItem('session_pwd');
 
         if (storedUser && sessionPwd) {
             const parsedUser = JSON.parse(storedUser);
@@ -30,11 +31,11 @@ export const AuthProvider = ({ children }) => {
                         setKeys(parsedKeys);
 
                         // Re-sync public key with backend
-                        fetch('http://localhost:8080/api/v1/users/sync-key', {
+                        fetch(`${API_BASE}/api/v1/users/sync-key`, {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
-                                'Authorization': 'Bearer ' + parsedUser.accessToken
+                                'Authorization': 'Bearer ' + parsedUser.accessToken,
                             },
                             body: JSON.stringify({ publicKey: parsedKeys.publicKey })
                         }).catch(console.error);
@@ -57,7 +58,7 @@ export const AuthProvider = ({ children }) => {
     }, []);
 
     const login = async (identifier, password, onStatusUpdate) => {
-        const res = await fetch('http://localhost:8080/api/v1/auth/login', {
+        const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ identifier, password })
@@ -77,9 +78,7 @@ export const AuthProvider = ({ children }) => {
                 if (onStatusUpdate) onStatusUpdate('Decrypting local keys...');
                 const decryptedStr = decryptDataWithPassword(JSON.parse(storedEncryptedKeys), derivedKey);
                 currentKeys = JSON.parse(decryptedStr);
-                console.log('✅ Loaded existing keys from localStorage');
             } catch (e) {
-                console.error('❌ Could not decrypt local keys');
             }
         }
 
@@ -87,18 +86,21 @@ export const AuthProvider = ({ children }) => {
         if (!currentKeys) {
             try {
                 if (onStatusUpdate) onStatusUpdate('Syncing keys from server...');
-                const bundleRes = await fetch('http://localhost:8080/api/v1/users/key-bundle', {
+                const bundleRes = await fetch(`${API_BASE}/api/v1/users/key-bundle`, {
                     headers: { 'Authorization': 'Bearer ' + data.accessToken }
                 });
                 if (bundleRes.ok) {
                     const bundleData = await bundleRes.json();
-                    if (onStatusUpdate) onStatusUpdate('Decrypting synced keys...');
-                    const decryptedStr = decryptDataWithPassword(bundleData, derivedKey);
-                    currentKeys = JSON.parse(decryptedStr);
-                    console.log('✅ Keys downloaded from server');
+                    try {
+                        if (onStatusUpdate) onStatusUpdate('Decrypting synced keys...');
+                        const decryptedStr = decryptDataWithPassword(bundleData, derivedKey);
+                        currentKeys = JSON.parse(decryptedStr);
+                    } catch (decryptErr) {
+                    }
+                } else if (bundleRes.status === 404) {
+                } else {
                 }
             } catch (e) {
-                console.log('No server key bundle, will generate new keys');
             }
         }
 
@@ -106,13 +108,12 @@ export const AuthProvider = ({ children }) => {
         if (!currentKeys) {
             if (onStatusUpdate) onStatusUpdate('Generating new keys...');
             currentKeys = await generateRSAKeyPair();
-            console.log('🔑 Generated new RSA key pair');
 
-            await fetch('http://localhost:8080/api/v1/users/sync-key', {
+            await fetch(`${API_BASE}/api/v1/users/sync-key`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + data.accessToken
+                    'Authorization': 'Bearer ' + data.accessToken,
                 },
                 body: JSON.stringify({ publicKey: currentKeys.publicKey })
             });
@@ -122,20 +123,18 @@ export const AuthProvider = ({ children }) => {
         if (onStatusUpdate) onStatusUpdate('Saving secure session...');
         const encryptedKeys = encryptDataWithPassword(JSON.stringify(currentKeys), derivedKey);
         localStorage.setItem(`rsaKeys_${data.userId}`, JSON.stringify(encryptedKeys));
-        sessionStorage.setItem('session_pwd', password);
+        localStorage.setItem('session_pwd', password);
 
         try {
-            await fetch('http://localhost:8080/api/v1/users/key-bundle', {
+            await fetch(`${API_BASE}/api/v1/users/key-bundle`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + data.accessToken
+                    'Authorization': 'Bearer ' + data.accessToken,
                 },
                 body: JSON.stringify({ encryptedKeyBundle: JSON.stringify(encryptedKeys) })
             });
-            console.log('☁️ Key bundle uploaded to server');
         } catch (e) {
-            console.error('Failed to upload key bundle', e);
         }
 
         setKeys(currentKeys);
@@ -146,7 +145,7 @@ export const AuthProvider = ({ children }) => {
     };
 
     const register = async (username, email, password) => {
-        const res = await fetch('http://localhost:8080/api/v1/auth/register', {
+        const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, email, password })
@@ -164,7 +163,7 @@ export const AuthProvider = ({ children }) => {
         setUser(null);
         setKeys(null);
         localStorage.removeItem('prama_auth_user');
-        sessionStorage.removeItem('session_pwd');
+        localStorage.removeItem('session_pwd');
     };
 
     const apiFetch = async (url, options = {}) => {
@@ -172,6 +171,17 @@ export const AuthProvider = ({ children }) => {
         if (!currentUser) {
             const stored = localStorage.getItem('prama_auth_user');
             if (stored) currentUser = JSON.parse(stored);
+        }
+
+        // Security Gating: Prevent non-admins from hitting admin endpoints to avoid 403 loops
+        if (url.includes('/api/v1/admin/') && currentUser?.role !== 'ROLE_ADMIN') {
+            return {
+                ok: false,
+                status: 403,
+                statusText: 'Forbidden (Role Gated)',
+                json: async () => ({ error: 'Unauthorized: Admin role required' }),
+                text: async () => 'Unauthorized'
+            };
         }
 
         const runFetch = (token) => {
@@ -185,7 +195,7 @@ export const AuthProvider = ({ children }) => {
         if (res.status === 401 || res.status === 403) {
             if (currentUser?.refreshToken) {
                 try {
-                    const refreshRes = await fetch('http://localhost:8080/api/v1/auth/refresh', {
+                    const refreshRes = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ token: currentUser.refreshToken })

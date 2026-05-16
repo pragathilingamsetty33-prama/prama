@@ -48,7 +48,8 @@ public class SecurityConfig {
                 .xssProtection(xss -> xss.disable()) // Browser default or CSP is better
             )
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/v1/auth/**", "/error/**", "/ws/**").permitAll()
+                .requestMatchers("/api/v1/auth/**", "/api/v1/attachments/**", "/error/**", "/ws/**").permitAll()
+                .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
             )
             .sessionManagement(session -> session

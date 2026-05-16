@@ -51,7 +51,10 @@ public class ChatController {
                         .recipientId(m.getRecipient().getId())
                         .encryptedAesKey(m.getEncryptedAesKey())
                         .senderEncryptedAesKey(m.getSenderEncryptedAesKey())
-                        .encryptedMessage(m.getEncryptedContent())
+                        .encryptedContent(m.getEncryptedContent())
+                        .iv(m.getIv())
+                        .tag(m.getTag())
+                        .status(m.getStatus())
                         .timestamp(m.getTimestamp())
                         .build())
                 .collect(Collectors.toList());
@@ -59,47 +62,45 @@ public class ChatController {
 
     @MessageMapping("/chat.sendMessage")
     public void processMessage(@Payload ChatMessage chatMessage, SimpMessageHeaderAccessor headerAccessor) {
-        // Extract the authenticated sender from the WebSocket session
         UsernamePasswordAuthenticationToken auth = (UsernamePasswordAuthenticationToken) headerAccessor.getUser();
         if (auth == null || !(auth.getPrincipal() instanceof User)) {
             throw new RuntimeException("Unauthorized WebSocket Request");
         }
 
         User sender = (User) auth.getPrincipal();
-
-        // Enforce that the sender ID matches the authenticated user
         chatMessage.setSenderId(sender.getId());
+        chatMessage.setStatus("SENT");
         chatMessage.setTimestamp(Instant.now().toString());
 
-        // Persist message and send push notification to recipient
         userRepository.findById(chatMessage.getRecipientId()).ifPresent(recipient -> {
-            // Save to DB
             Message message = Message.builder()
                     .sender(sender)
                     .recipient(recipient)
                     .encryptedAesKey(chatMessage.getEncryptedAESKey())
                     .senderEncryptedAesKey(chatMessage.getSenderEncryptedAESKey())
-                    .encryptedContent(chatMessage.getEncryptedMessage())
+                    .encryptedContent(chatMessage.getEncryptedContent())
+                    .iv(chatMessage.getIv())
+                    .tag(chatMessage.getTag())
                     .build();
             messageRepository.save(message);
             chatMessage.setId(message.getId());
 
-            // Push notification
             if (recipient.getFcmToken() != null) {
-                notificationService.sendPushNotification(
+                notificationService.sendSecureNotification(
                     recipient.getFcmToken(),
-                    "New Encrypted Message",
-                    "You have a new secure message from " + sender.getUsername()
+                    sender.getUsername(),
+                    chatMessage.getEncryptedContent(),
+                    chatMessage.getIv(),
+                    chatMessage.getTag(),
+                    chatMessage.getEncryptedAESKey()
                 );
             }
         });
 
-        // Because messages are end-to-end encrypted with the recipient's public key, 
-        // we can safely route them using a specific UUID topic. Even if intercepted, 
-        // they cannot be decrypted without the recipient's private key.
         messagingTemplate.convertAndSend(
-                "/topic/messages/" + chatMessage.getRecipientId().toString(),
+                "/topic/messages." + chatMessage.getRecipientId().toString(),
                 chatMessage
         );
+
     }
 }

@@ -2,11 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import { useRouter } from 'expo-router';
-import { Users, Bell, UserPlus, LogOut } from 'lucide-react-native';
+import { Users, Bell, UserPlus, LogOut, Cloud } from 'lucide-react-native';
 import { API_BASE_URL } from '../../constants/Config';
 
 export default function ChatsScreen() {
-  const { user, apiFetch, logout, loading: authLoading } = useAuth();
+  const { user, apiFetch, logout, syncKeysToServer, loading: authLoading } = useAuth();
   const router = useRouter();
   const [friends, setFriends] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -65,9 +65,23 @@ export default function ChatsScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Prama Chats</Text>
-        <TouchableOpacity onPress={logout}>
-          <LogOut color="#ff6b6b" size={24} />
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 15, alignItems: 'center' }}>
+          <TouchableOpacity 
+            onPress={async () => {
+              try {
+                await syncKeysToServer();
+                Alert.alert('Success', 'Keys synced to cloud! You can now log in on other devices.');
+              } catch (e) {
+                Alert.alert('Error', 'Sync failed. Please check your connection.');
+              }
+            }}
+          >
+            <Cloud color="#66fcf1" size={24} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={logout}>
+            <LogOut color="#ff6b6b" size={24} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <FlatList 

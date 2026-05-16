@@ -1,5 +1,6 @@
 package com.example.prama.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -15,15 +16,22 @@ public class ChatMessage {
     private UUID id;
     private UUID senderId;
     private UUID recipientId;
+    private UUID groupId;
     
-    // The temporary AES key, encrypted with the recipient's RSA Public Key
+    // The ephemeral AES key, encrypted with the recipient's RSA Public Key
     private String encryptedAESKey;
     
     // The same AES key, encrypted with the sender's own RSA Public Key (for sender history)
     private String senderEncryptedAESKey;
     
-    // The actual chat message, encrypted with the temporary AES Key
-    private String encryptedMessage;
+    // The actual content (message text or file metadata), encrypted with the AES key
+    @JsonProperty("encryptedContent")
+    private String encryptedContent;
     
+    // AES-GCM parameters
+    private String iv;
+    private String tag;
+    
+    private String status;
     private String timestamp;
 }

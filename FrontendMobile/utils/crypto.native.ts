@@ -62,7 +62,15 @@ export const encryptDataWithPassword = (dataString: string, derivedKey: Uint8Arr
  * Decrypt data using the symmetric key (AES‑GCM).
  */
 export const decryptDataWithPassword = (encryptedData: any, derivedKey: Uint8Array): string => {
-  const { iv, cipherText, tag } = encryptedData;
+  // Handle both web format (lowercase 'ciphertext') and mobile format (camelCase 'cipherText')
+  const iv = encryptedData.iv;
+  const tag = encryptedData.tag;
+  const cipherTextData = encryptedData.cipherText || encryptedData.ciphertext;
+  
+  if (!iv || !tag || !cipherTextData) {
+    throw new Error('Invalid encrypted package format: missing iv, tag, or ciphertext');
+  }
+
   const derivedBuffer = forge.util.createBuffer(Buffer.from(derivedKey));
   const decipher = forge.cipher.createDecipher('AES-GCM', derivedBuffer);
 
@@ -70,7 +78,7 @@ export const decryptDataWithPassword = (encryptedData: any, derivedKey: Uint8Arr
     iv: forge.util.decode64(iv),
     tag: forge.util.createBuffer(forge.util.decode64(tag)),
   });
-  decipher.update(forge.util.createBuffer(forge.util.decode64(cipherText)));
+  decipher.update(forge.util.createBuffer(forge.util.decode64(cipherTextData)));
   const pass = decipher.finish();
 
   if (!pass) throw new Error('Decryption failed: Incorrect password or corrupted data.');
@@ -118,7 +126,10 @@ export const decryptMessageWithAES = (encryptedData: any, aesKey: string) => {
     // In chat app it was saved as cipherText or ciphertext depending on platform, normalize:
     const cipherTxt = encryptedData.ciphertext || encryptedData.cipherText;
     const { iv, tag } = encryptedData;
-    const decipher = forge.cipher.createDecipher('AES-GCM', aesKey);
+    // Normalize key: handle both string and buffer/Uint8Array
+    const keyBuffer = forge.util.createBuffer(Buffer.from(aesKey, typeof aesKey === 'string' && aesKey.length !== 32 ? 'base64' : 'binary'));
+    
+    const decipher = forge.cipher.createDecipher('AES-GCM', keyBuffer);
     decipher.start({
         iv: forge.util.decode64(iv),
         tag: forge.util.createBuffer(forge.util.decode64(tag))
@@ -128,4 +139,39 @@ export const decryptMessageWithAES = (encryptedData: any, aesKey: string) => {
         return forge.util.decodeUtf8(decipher.output.getBytes());
     }
     throw new Error('Failed to decrypt message - authentication tag mismatch');
+};
+export const encryptFileWithAES = (arrayBuffer: ArrayBuffer, aesKey: string) => {
+    const iv = forge.random.getBytesSync(12);
+    const cipher = forge.cipher.createCipher('AES-GCM', aesKey);
+    cipher.start({ iv });
+    cipher.update(forge.util.createBuffer(Buffer.from(arrayBuffer)));
+    cipher.finish();
+    return {
+        iv: forge.util.encode64(iv),
+        ciphertext: forge.util.encode64(cipher.output.getBytes()),
+        tag: forge.util.encode64(cipher.mode.tag.getBytes())
+    };
+};
+
+export const decryptFileWithAES = (encryptedData: any, aesKey: any) => {
+    const { iv, ciphertext, tag } = encryptedData;
+    
+    // Normalize key: handle both base64 string and raw binary
+    const keyBuffer = forge.util.createBuffer(Buffer.from(aesKey, typeof aesKey === 'string' && aesKey.length !== 32 ? 'base64' : 'binary'));
+
+    const decipher = forge.cipher.createDecipher('AES-GCM', keyBuffer);
+    decipher.start({
+        iv: forge.util.decode64(iv),
+        tag: forge.util.createBuffer(forge.util.decode64(tag))
+    });
+    decipher.update(forge.util.createBuffer(forge.util.decode64(ciphertext)));
+    if (decipher.finish()) {
+        const decodedBytes = decipher.output.getBytes();
+        const result = new Uint8Array(decodedBytes.length);
+        for (let i = 0; i < decodedBytes.length; i++) {
+            result[i] = decodedBytes.charCodeAt(i);
+        }
+        return result.buffer;
+    }
+    throw new Error('Failed to decrypt file - authentication tag mismatch');
 };

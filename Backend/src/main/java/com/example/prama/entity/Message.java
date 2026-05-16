@@ -1,9 +1,11 @@
 package com.example.prama.entity;
 
 import jakarta.persistence.*;
-import lombok.*;
-
-import java.time.LocalDateTime;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.time.Instant;
 import java.util.UUID;
 
 @Entity
@@ -18,23 +20,38 @@ public class Message {
     @GeneratedValue(strategy = GenerationType.AUTO)
     private UUID id;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne
     @JoinColumn(name = "sender_id", nullable = false)
     private User sender;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne
     @JoinColumn(name = "recipient_id", nullable = false)
     private User recipient;
 
-    @Column(name = "encrypted_aes_key", nullable = false, columnDefinition = "TEXT")
-    private String encryptedAesKey;
-
-    @Column(name = "sender_encrypted_aes_key", columnDefinition = "TEXT")
-    private String senderEncryptedAesKey;
-
-    @Column(name = "encrypted_content", nullable = false, columnDefinition = "TEXT")
+    @Column(columnDefinition = "TEXT", nullable = false)
     private String encryptedContent;
 
+    @Column(columnDefinition = "TEXT", nullable = false)
+    private String encryptedAesKey;
+
+    @Column(columnDefinition = "TEXT")
+    private String senderEncryptedAesKey;
+
+    @Column(nullable = false)
+    private String iv;
+
+    @Column(nullable = false)
+    private String tag;
+
+    @Column(nullable = false)
+    private Instant timestamp;
+
+    @Column(nullable = false)
     @Builder.Default
-    private LocalDateTime timestamp = LocalDateTime.now();
+    private String status = "SENT"; // SENT, DELIVERED, READ
+
+    @PrePersist
+    protected void onCreate() {
+        timestamp = Instant.now();
+    }
 }

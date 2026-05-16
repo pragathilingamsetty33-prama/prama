@@ -1,6 +1,7 @@
 package com.example.prama.config;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
@@ -15,29 +16,50 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtChannelInterceptor jwtChannelInterceptor;
 
+    @Value("${spring.rabbitmq.host:localhost}")
+    private String rabbitHost;
+
+    @Value("${spring.rabbitmq.username:guest}")
+    private String rabbitUser;
+
+    @Value("${spring.rabbitmq.password:guest}")
+    private String rabbitPass;
+
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
-        // The endpoint clients will use to connect to our websocket server
         registry.addEndpoint("/ws")
                 .setAllowedOriginPatterns("*")
-                .withSockJS(); // Fallback option for older browsers
+                .withSockJS();
     }
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
-        // Prefix for messages FROM server TO client (e.g. subscribing to a chat)
-        registry.enableSimpleBroker("/user", "/topic");
-        
-        // Prefix for messages FROM client TO server
+        // Upgrade from SimpleBroker to StompBrokerRelay for RabbitMQ
+        registry.enableStompBrokerRelay("/topic", "/queue")
+                .setRelayHost(rabbitHost)
+                .setRelayPort(61613) // Default STOMP port for RabbitMQ
+                .setClientLogin(rabbitUser)
+                .setClientPasscode(rabbitPass)
+                .setSystemLogin(rabbitUser)
+                .setSystemPasscode(rabbitPass)
+                .setSystemHeartbeatSendInterval(10000)
+                .setSystemHeartbeatReceiveInterval(10000)
+                .setVirtualHost("/");
+
         registry.setApplicationDestinationPrefixes("/app");
-        
-        // Prefix used to send messages to specific users
         registry.setUserDestinationPrefix("/user");
     }
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
-        // Intercept incoming websocket messages to check for JWT tokens
         registration.interceptors(jwtChannelInterceptor);
+    }
+
+    @Override
+    public void configureWebSocketTransport(
+            org.springframework.web.socket.config.annotation.WebSocketTransportRegistration registration) {
+        registration.setMessageSizeLimit(256 * 1024); // 256KB for encrypted packets
+        registration.setSendBufferSizeLimit(1024 * 1024);
+        registration.setSendTimeLimit(20000);
     }
 }

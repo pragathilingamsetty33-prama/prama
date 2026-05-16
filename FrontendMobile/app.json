@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Prama uses FaceID to securely unlock your encrypted messages without re-entering your password."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -20,7 +23,14 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.FrontendMobile"
+      "package": "com.anonymous.FrontendMobile",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK"
+      ]
     },
     "web": {
       "output": "static",
@@ -28,6 +38,15 @@
     },
     "plugins": [
       "expo-router",
+      "expo-local-authentication",
+      "expo-notifications",
+      "expo-task-manager",
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": "Prama uses FaceID to securely unlock your encrypted messages."
+        }
+      ],
       [
         "expo-splash-screen",
         {

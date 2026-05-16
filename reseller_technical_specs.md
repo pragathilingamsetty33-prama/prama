@@ -3,8 +3,7 @@
 **Version:** 1.0.0-RELEASE
 **Target Audience:** CTO, Technical Lead, Enterprise IT Infrastructure Team
 
----
-
+---                                          
 ## 1. Executive Summary & Business Value
 
 The Prama Secure Messaging System is a production-grade, end-to-end encrypted (E2EE) real-time communication platform designed to provide uncompromising data privacy and seamless multi-device synchronization. For an enterprise IT agency, acquiring an Unlimited Reseller License presents a massive opportunity to offer a fully white-labeled, high-security internal communication tool to security-conscious clients (e.g., healthcare, finance, legal, and government sectors).

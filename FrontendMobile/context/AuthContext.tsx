@@ -20,11 +20,13 @@ interface Keys {
 interface AuthContextType {
   user: User | null;
   keys: Keys | null;
+  masterKey: Uint8Array | null;
   loading: boolean;
   login: (identifier: string, password: string, onStatusUpdate?: (msg: string) => void) => Promise<User>;
   register: (username: string, email: string, password: string) => Promise<boolean>;
   logout: () => void;
   apiFetch: (url: string, options?: any) => Promise<Response>;
+  syncKeysToServer: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -62,17 +64,11 @@ const deleteSecureItemAsync = async (key: string) => {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [keys, setKeys] = useState<Keys | null>(null);
+  const [masterKey, setMasterKey] = useState<Uint8Array | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // On web (browser), SecureStore is not natively supported in the same way as Expo.
-    if (typeof document !== 'undefined' && typeof navigator !== 'undefined' && navigator.product !== 'ReactNative') {
-      console.log('⚡ Web platform detected – skipping session restore');
-      setLoading(false);
-      return;
-    }
     const restoreSession = async () => {
-      console.log("📂 AuthContext: Restoring session...");
       try {
         const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 4000));
 
@@ -86,13 +82,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             if (storedEncryptedKeys) {
               try {
-                console.log("🔐 Decrypting keys...");
                 const derivedKey = await deriveKeyFromPassword(sessionPwd, parsedUser.userId);
                 const decryptedStr = decryptDataWithPassword(JSON.parse(storedEncryptedKeys), derivedKey);
                 const parsedKeys = JSON.parse(decryptedStr);
                 setUser(parsedUser);
                 setKeys(parsedKeys);
-                console.log("✅ Session restored");
+                setMasterKey(derivedKey);
               } catch (e) {
                 console.error('Session restore decryption failed', e);
               }
@@ -104,7 +99,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (e) {
         console.error('Failed to restore session', e);
       } finally {
-        console.log("⌛ AuthContext: Loading set to false");
         setLoading(false);
       }
     };
@@ -125,18 +119,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     const data = await res.json();
 
+    if (onStatusUpdate) onStatusUpdate('Securing session...');
+    const derivedKey = await deriveKeyFromPassword(password, data.userId);
+
     let currentKeys: Keys | null = null;
-    let derivedKey: Uint8Array | null = null;
 
     // Step 1: try local secure store
     const storedEncryptedKeys = await getSecureItemAsync(`rsaKeys_${data.userId}`);
     if (storedEncryptedKeys) {
       try {
-        if (onStatusUpdate) onStatusUpdate('Securing local session...');
-        derivedKey = await deriveKeyFromPassword(password, data.userId);
+        if (onStatusUpdate) onStatusUpdate('Restoring local keys...');
         const decryptedStr = decryptDataWithPassword(JSON.parse(storedEncryptedKeys), derivedKey);
         currentKeys = JSON.parse(decryptedStr);
-        console.log('🔑 Keys loaded from SecureStore');
       } catch (e) {
         console.error('Could not decrypt stored keys', e);
       }
@@ -145,19 +139,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Step 2: try server key-bundle (cross-device sync)
     if (!currentKeys) {
       try {
-        if (onStatusUpdate) onStatusUpdate('Syncing keys from server...');
+        if (onStatusUpdate) onStatusUpdate('Syncing keys from cloud...');
         const bundleRes = await fetch(`${API_BASE_URL}/api/v1/users/key-bundle`, {
           headers: { 'Authorization': 'Bearer ' + data.accessToken },
         });
         if (bundleRes.ok) {
           const bundleData = await bundleRes.json();
-          if (!derivedKey) {
-            if (onStatusUpdate) onStatusUpdate('Securing cloud session...');
-            derivedKey = await deriveKeyFromPassword(password, data.userId);
-          }
           const decryptedStr = decryptDataWithPassword(bundleData, derivedKey);
           currentKeys = JSON.parse(decryptedStr);
-          console.log('🔑 Keys downloaded from server');
         }
       } catch (e) {
         console.log('No server key bundle, will generate new keys');
@@ -166,10 +155,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Step 3: generate fresh keys if none exist
     if (!currentKeys) {
-      if (onStatusUpdate) onStatusUpdate('Generating encryption keys...');
+      if (onStatusUpdate) onStatusUpdate('Generating fresh encryption keys...');
       const generated = await generateRSAKeyPair();
       currentKeys = generated;
-      console.log('🔑 Generated new RSA key pair');
       await fetch(`${API_BASE_URL}/api/v1/users/sync-key`, {
         method: 'POST',
         headers: {
@@ -181,10 +169,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     // Step 4: Encrypt and store locally + upload
-    if (!derivedKey) {
-        if (onStatusUpdate) onStatusUpdate('Securing session...');
-        derivedKey = await deriveKeyFromPassword(password, data.userId);
-    }
     const encryptedKeys = encryptDataWithPassword(JSON.stringify(currentKeys), derivedKey);
 
     if (onStatusUpdate) onStatusUpdate('Saving secure session...');
@@ -204,12 +188,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         },
         body: JSON.stringify({ encryptedKeyBundle: JSON.stringify(encryptedKeys) }),
       });
-      console.log('☁️ Key bundle uploaded to server');
     } catch (e) {
       console.error('Failed to upload key bundle', e);
     }
 
     setKeys(currentKeys);
+    setMasterKey(derivedKey);
     setUser(data);
     return data;
   };
@@ -234,6 +218,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = async () => {
     setUser(null);
     setKeys(null);
+    setMasterKey(null);
     if (user) {
       await deleteSecureItemAsync(`rsaKeys_${user.userId}`);
     }
@@ -251,7 +236,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const runFetch = (token?: string) => {
       const headers = { ...options.headers };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      return fetch(url, { ...options, headers });
+      
+      // Auto-prepend base URL for relative paths
+      const finalUrl = url.startsWith('/') ? `${API_BASE_URL}${url}` : url;
+      return fetch(finalUrl, { ...options, headers });
     };
 
     let res = await runFetch(currentUser?.accessToken);
@@ -284,8 +272,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return res;
   };
 
+  const syncKeysToServer = async () => {
+    if (!user || !keys) {
+      return;
+    }
+    const sessionPwd = await getSecureItemAsync('session_pwd');
+    if (!sessionPwd) {
+      return;
+    }
+
+    try {
+      const derivedKey = await deriveKeyFromPassword(sessionPwd, user.userId);
+      const encryptedKeys = encryptDataWithPassword(JSON.stringify(keys), derivedKey);
+
+      await fetch(`${API_BASE_URL}/api/v1/users/key-bundle`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + user.accessToken,
+        },
+        body: JSON.stringify({ encryptedKeyBundle: JSON.stringify(encryptedKeys) }),
+      });
+    } catch (e) {
+      console.error('Manual key sync failed', e);
+      throw e;
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, keys, login, register, logout, loading, apiFetch }}>
+    <AuthContext.Provider value={{ user, keys, masterKey, login, register, logout, loading, apiFetch, syncKeysToServer }}>
       {children}
     </AuthContext.Provider>
   );

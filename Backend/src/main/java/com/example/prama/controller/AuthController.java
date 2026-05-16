@@ -39,4 +39,9 @@ public class AuthController {
     ) {
         return ResponseEntity.ok(authService.refreshToken(request));
     }
+
+    @org.springframework.web.bind.annotation.GetMapping("/health")
+    public ResponseEntity<String> health() {
+        return ResponseEntity.ok("OK");
+    }
 }

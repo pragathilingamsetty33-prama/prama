@@ -24,7 +24,6 @@ function RootLayoutContent() {
 
   useEffect(() => {
     if (!loading) {
-      console.log("🚀 RootLayout: Auth loaded, hiding splash...");
       SplashScreen.hideAsync().catch(console.error);
     }
   }, [loading]);

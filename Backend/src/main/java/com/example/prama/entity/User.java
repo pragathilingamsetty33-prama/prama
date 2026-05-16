@@ -52,10 +52,18 @@ public class User implements UserDetails {
     @Column
     private String fcmToken;
 
+    @Column(nullable = false)
+    @Builder.Default
+    private String role = "ROLE_USER";
+
+    @Column(nullable = false)
+    @Builder.Default
+    private boolean enabled = true;
+
     // Spring Security UserDetails methods
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_USER"));
+        return List.of(new SimpleGrantedAuthority(role));
     }
 
     @Override
@@ -80,6 +88,6 @@ public class User implements UserDetails {
 
     @Override
     public boolean isEnabled() {
-        return true;
+        return enabled;
     }
 }

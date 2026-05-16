@@ -42,7 +42,7 @@ public class AttachmentController {
             Files.copy(file.getInputStream(), this.root.resolve(filename), StandardCopyOption.REPLACE_EXISTING);
             
             Map<String, String> response = new HashMap<>();
-            response.put("url", "http://localhost:8080/api/v1/attachments/" + filename);
+            response.put("url", "/api/v1/attachments/" + filename);
             response.put("filename", filename);
             
             return ResponseEntity.ok(response);

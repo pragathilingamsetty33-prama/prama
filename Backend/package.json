@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@zxcvbn-ts/core": "^3.0.4",
+    "expo-crypto": "^55.0.15",
+    "react-native-argon2": "^4.0.0"
+  }
+}

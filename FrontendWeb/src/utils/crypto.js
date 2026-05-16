@@ -11,16 +11,13 @@ if (typeof window !== 'undefined' && typeof window.Buffer === 'undefined') {
  * Generate a new RSA Key Pair (2048 bit).
  */
 export const generateRSAKeyPair = async () => {
-    return new Promise((resolve, reject) => {
-        forge.pki.rsa.generateKeyPair({ bits: 2048, workers: -1 }, (err, keypair) => {
-            if (err) return reject(err);
+    // Using synchronous generation to avoid web worker issues (prime.worker.js not found)
+    const keypair = forge.pki.rsa.generateKeyPair(2048);
+    
+    const publicKeyPem = forge.pki.publicKeyToPem(keypair.publicKey);
+    const privateKeyPem = forge.pki.privateKeyToPem(keypair.privateKey);
 
-            const publicKeyPem = forge.pki.publicKeyToPem(keypair.publicKey);
-            const privateKeyPem = forge.pki.privateKeyToPem(keypair.privateKey);
-
-            resolve({ publicKey: publicKeyPem, privateKey: privateKeyPem });
-        });
-    });
+    return { publicKey: publicKeyPem, privateKey: privateKeyPem };
 };
 
 /**

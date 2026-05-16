@@ -3,127 +3,216 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import SockJS from 'sockjs-client';
 import { Stomp } from '@stomp/stompjs';
-import { Search, Send, ShieldCheck, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera } from 'lucide-react';
+import { Search, Send, ShieldCheck, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward } from 'lucide-react';
 import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES } from '../utils/crypto';
+import { KeyCache } from '../utils/KeyCache';
 import forge from 'node-forge';
 
-const AttachmentViewer = ({ attachment }) => {
-    const [isDecrypting, setIsDecrypting] = useState(true);
-    const [decryptedUrl, setDecryptedUrl] = useState(null);
-    const [error, setError] = useState(null);
-
-    const isImage = attachment.type?.startsWith('image/');
-    const isVideo = attachment.type?.startsWith('video/');
-
-    // Auto-decrypt on mount
-    useEffect(() => {
-        let cancelled = false;
-        const decrypt = async () => {
-            try {
-                const storedUser = localStorage.getItem('prama_auth_user');
-                const token = storedUser ? JSON.parse(storedUser).accessToken : null;
-                const res = await fetch(attachment.url, {
-                    headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-                });
-                if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-                const encryptedFileObj = await res.json();
-                const fileAesKey = forge.util.decode64(attachment.fileAesKey);
-                const arrayBuffer = decryptFileWithAES(encryptedFileObj, fileAesKey);
-                if (cancelled) return;
-                const blob = new Blob([arrayBuffer], { type: attachment.type });
-                setDecryptedUrl(URL.createObjectURL(blob));
-            } catch (e) {
-                console.error('Attachment decrypt failed:', e);
-                if (!cancelled) setError('Failed to decrypt');
+const openPramaDB = () => {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open("PramaAttachmentCache", 1);
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains("attachments")) {
+                db.createObjectStore("attachments");
             }
-            if (!cancelled) setIsDecrypting(false);
         };
-        decrypt();
-        return () => { cancelled = true; };
-    }, [attachment.url]);
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e.target.error);
+    });
+};
 
-    // Loading state
+const getCachedFile = async (id) => {
+    try {
+        const db = await openPramaDB();
+        return new Promise((resolve) => {
+            const transaction = db.transaction("attachments", "readonly");
+            const store = transaction.objectStore("attachments");
+            const request = store.get(id);
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => resolve(null);
+        });
+    } catch (e) {
+        return null;
+    }
+};
+
+const cacheFile = async (id, blob) => {
+    try {
+        const db = await openPramaDB();
+        const transaction = db.transaction("attachments", "readwrite");
+        const store = transaction.objectStore("attachments");
+        store.put(blob, id);
+    } catch (err) {
+        console.error("Failed to write to IndexedDB cache", err);
+    }
+};
+
+const purgePramaCache = () => {
+    indexedDB.deleteDatabase("PramaAttachmentCache");
+};
+
+const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache, setAttachmentCache, onForward, decryptedFiles, setDecryptedFiles }) => {
+    // Check if this file has been decrypted in the CURRENT session
+    const sessionUrl = decryptedFiles[messageId];
+    
+    const [isDecrypting, setIsDecrypting] = useState(false);
+    const [error, setError] = useState(null);
+    
+    const isImage = attachment.type?.startsWith('image/');
+    const API_BASE = import.meta.env.VITE_API_URL;
+
+    const handleDownloadAndDecrypt = async () => {
+        setIsDecrypting(true);
+        try {
+            const storedUser = localStorage.getItem('prama_auth_user');
+            const token = storedUser ? JSON.parse(storedUser).accessToken : null;
+            
+            let downloadUrl = attachment.url;
+            if (downloadUrl.startsWith('/')) {
+                downloadUrl = API_BASE + downloadUrl;
+            }
+
+            const res = await fetch(downloadUrl, {
+                headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+            });
+            if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+            const encryptedFileObj = await res.json();
+            const fileAesKey = forge.util.decode64(attachment.fileAesKey);
+            const arrayBuffer = decryptFileWithAES(encryptedFileObj, fileAesKey);
+            
+            const blob = new Blob([arrayBuffer], { type: attachment.type });
+            const url = URL.createObjectURL(blob);
+            
+            // Save to SESSION state only (No localStorage for group privacy)
+            setDecryptedFiles(prev => ({ ...prev, [messageId]: url }));
+            
+            // PROFESSIONAL CACHING: Save to persistent IndexedDB
+            await cacheFile(messageId, blob);
+            
+            if (setAttachmentCache) {
+                setAttachmentCache(prev => ({ ...prev, [attachment.url]: url }));
+            }
+        } catch (e) {
+            console.error('Attachment decrypt failed:', e);
+            setError('Failed to decrypt');
+        }
+        setIsDecrypting(false);
+    };
+
+    const handleSave = () => {
+        if (!sessionUrl) return;
+        const link = document.createElement('a');
+        link.href = sessionUrl;
+        link.download = attachment.name || 'download';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    // 1. Loading/Decrypting State
     if (isDecrypting) {
         return (
-            <div style={{ marginTop: '10px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <Loader size={18} className="spin" style={{ color: '#00e5a0' }} />
-                <span style={{ fontSize: '13px', color: '#aaa' }}>Decrypting {isImage ? 'image' : isVideo ? 'video' : 'file'}...</span>
+            <div style={{ marginTop: '10px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Loader size={18} className="animate-spin text-cyan-400" />
+                <span style={{ fontSize: '13px', color: '#aaa' }}>Downloading & Decrypting...</span>
             </div>
         );
     }
 
-    // Error state
-    if (error) {
-        return (
-            <div style={{ marginTop: '10px', padding: '10px', background: 'rgba(255,50,50,0.15)', borderRadius: '10px', fontSize: '12px', color: '#ff6b6b' }}>
-                🔒 {error}
-            </div>
-        );
-    }
-
-    // Render IMAGE inline
-    if (isImage && decryptedUrl) {
+    // 2. Initial State (Not Decrypted in this session)
+    if (!sessionUrl) {
         return (
             <div style={{ marginTop: '10px' }}>
-                <img
-                    src={decryptedUrl}
-                    alt={attachment.name}
-                    style={{
-                        maxWidth: '100%',
-                        maxHeight: '300px',
-                        borderRadius: '12px',
-                        objectFit: 'cover',
-                        cursor: 'pointer',
-                        boxShadow: '0 2px 12px rgba(0,0,0,0.3)'
-                    }}
-                    onClick={() => window.open(decryptedUrl, '_blank')}
-                    title="Click to view full size"
-                />
+                <div 
+                    onClick={handleDownloadAndDecrypt}
+                    style={{ background: 'rgba(102, 252, 241, 0.1)', border: '1px solid rgba(102, 252, 241, 0.3)', padding: '12px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '12px' }}
+                >
+                    {isImage ? <ImageIcon size={24} style={{ color: '#66fcf1' }} /> : <FileIcon size={24} style={{ color: '#66fcf1' }} />}
+                    <div style={{ overflow: 'hidden', flex: 1 }}>
+                        <div style={{ color: '#fff', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{attachment.name}</div>
+                        <div style={{ color: '#00ff88', fontSize: '10px', fontWeight: 'bold' }}>OPEN / DECRYPT</div>
+                    </div>
+                </div>
             </div>
         );
     }
 
-    // Render VIDEO inline
-    if (isVideo && decryptedUrl) {
-        return (
-            <div style={{ marginTop: '10px' }}>
-                <video
-                    src={decryptedUrl}
-                    controls
-                    style={{
-                        maxWidth: '100%',
-                        maxHeight: '300px',
-                        borderRadius: '12px',
-                        boxShadow: '0 2px 12px rgba(0,0,0,0.3)'
-                    }}
-                />
-            </div>
-        );
-    }
-
-    // Render FILE as download link
+    // 3. Decrypted State (Available in this session)
     return (
-        <div style={{ marginTop: '10px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <FileIcon size={20} style={{ color: '#00e5a0', flexShrink: 0 }} />
-            <div style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '13px' }}>{attachment.name}</div>
-            {decryptedUrl ? (
-                <a href={decryptedUrl} download={attachment.name} style={{ color: '#00e5a0', display: 'flex' }}><Download size={20} /></a>
+        <div style={{ marginTop: '10px', maxWidth: '300px', position: 'relative' }}>
+            {isImage ? (
+                <div style={{ position: 'relative' }}>
+                    <img
+                        src={sessionUrl}
+                        alt={attachment.name}
+                        style={{ width: '100%', maxHeight: '200px', objectFit: 'cover', borderRadius: '12px', cursor: 'pointer', boxShadow: '0 4px 15px rgba(0,0,0,0.3)' }}
+                        onClick={() => onImageClick && onImageClick({ url: sessionUrl, name: attachment.name, type: attachment.type })}
+                    />
+                </div>
             ) : (
-                <span style={{ fontSize: '12px', color: '#666' }}>Unavailable</span>
+                <div 
+                    onClick={handleSave}
+                    style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
+                >
+                    <FileIcon size={24} style={{ color: '#00e5a0' }} />
+                    <div style={{ overflow: 'hidden' }}>
+                        <div style={{ color: '#fff', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{attachment.name}</div>
+                        <div style={{ color: '#00ff88', fontSize: '10px', fontWeight: 'bold' }}>VIEW / SAVE</div>
+                    </div>
+                </div>
             )}
+            
+            <button 
+                onClick={() => onForward(attachment)}
+                style={{ position: 'absolute', top: '8px', right: '8px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none', padding: '6px', borderRadius: '50%', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                title="Forward"
+            >
+                <Forward size={16} />
+            </button>
+            
+            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                {(isImage || attachment.type === 'application/pdf') && (
+                    <button 
+                        onClick={() => {
+                            if (isImage) {
+                                onImageClick && onImageClick({ url: sessionUrl, name: attachment.name, type: attachment.type });
+                            } else {
+                                window.open(sessionUrl, '_blank');
+                            }
+                        }}
+                        style={{ flex: 1, background: 'rgba(255, 255, 255, 0.05)', color: '#fff', border: '1px solid rgba(255, 255, 255, 0.1)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                    >
+                        View
+                    </button>
+                )}
+                <button 
+                    onClick={handleSave}
+                    style={{ flex: 1, background: 'rgba(0, 229, 160, 0.1)', color: '#00e5a0', border: '1px solid rgba(0, 229, 160, 0.3)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px', fontSize: '12px' }}
+                >
+                    <Download size={14} /> Save
+                </button>
+            </div>
         </div>
     );
 };
 
 const Chat = () => {
-    const { user, keys, logout, apiFetch } = useAuth();
+    const { user, keys, logout, apiFetch, loading } = useAuth();
     const navigate = useNavigate();
     const stompClient = useRef(null);
+    const keysRef = useRef(keys);
+    
+    // Sync keysRef with keys state to avoid stale closures in listeners
+    useEffect(() => {
+        keysRef.current = keys;
+    }, [keys]);
     
     const [messagesByFriend, setMessagesByFriend] = useState({}); // { friendId: [msg1, msg2] }
     const [inputMsg, setInputMsg] = useState('');
     const [selectedFile, setSelectedFile] = useState(null);
     const [isUploading, setIsUploading] = useState(false);
+    const [selectedImage, setSelectedImage] = useState(null);
     const fileInputRef = useRef(null);
     const [showCamera, setShowCamera] = useState(false);
     const videoRef = useRef(null);
@@ -143,19 +232,73 @@ const Chat = () => {
     
     // Unread messages & toast notification
     const [unreadCounts, setUnreadCounts] = useState({}); // { friendId: count }
+    const [attachmentCache, setAttachmentCache] = useState({}); // { url: decryptedUrl }
     const [toast, setToast] = useState(null); // { senderName, content, visible }
     const toastTimeoutRef = useRef(null);
+
+    const [showForwardModal, setShowForwardModal] = useState(false);
+    const [forwardingAttachment, setForwardingAttachment] = useState(null);
+    const groupSubscriptionRef = useRef(null);
+
+    // Group Chat States
+    const [groups, setGroups] = useState([]);
+    const [activeGroup, setActiveGroup] = useState(null);
+    const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
+    const [selectedMembers, setSelectedMembers] = useState([]);
+    const [newGroupName, setNewGroupName] = useState('');
+    const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+    const [groupRosterKeys, setGroupRosterKeys] = useState({}); // { groupId: [ { userId, publicKey }, ... ] }
+    const [decryptedFiles, setDecryptedFiles] = useState({}); // { messageId: blobUrl }
 
     // Keep activeFriendRef in sync
     useEffect(() => {
         activeFriendRef.current = activeFriend;
         // Clear unread count when opening a friend's chat
         if (activeFriend) {
+            setActiveGroup(null);
             setUnreadCounts(prev => ({ ...prev, [activeFriend.userId]: 0 }));
         }
     }, [activeFriend]);
 
     useEffect(() => {
+        if (activeGroup) {
+            setActiveFriend(null);
+            fetchGroupRoster(activeGroup.groupId);
+            
+            // Subscribe to group topic for real-time payloads
+            if (stompClient.current && stompClient.current.connected) {
+                if (groupSubscriptionRef.current) groupSubscriptionRef.current.unsubscribe();
+                groupSubscriptionRef.current = stompClient.current.subscribe(`/topic/group.${activeGroup.groupId}`, (msg) => {
+                    const receivedPayload = JSON.parse(msg.body);
+                    handleIncomingMessage(receivedPayload);
+                });
+            }
+
+            // Explicitly fetch and store group member public keys
+            fetchGroupRoster(activeGroup.groupId);
+        } else {
+            if (groupSubscriptionRef.current) {
+                groupSubscriptionRef.current.unsubscribe();
+                groupSubscriptionRef.current = null;
+            }
+        }
+    }, [activeGroup, stompClient.current?.connected]);
+
+    const fetchGroupRoster = async (groupId) => {
+        try {
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${groupId}/roster-keys`);
+            if (res.ok) {
+                const roster = await res.json();
+                setGroupRosterKeys(prev => ({ ...prev, [groupId]: roster }));
+            }
+        } catch (e) {
+            console.error("Error fetching group roster:", e);
+        }
+    };
+
+    useEffect(() => {
+        if (loading) return; // Wait for session restore to finish
+        
         if (!user) {
             navigate('/');
             return;
@@ -181,65 +324,191 @@ const Chat = () => {
         }
     }, [keys]);
 
+    const executeForward = async (recipientId) => {
+        if (!stompClient.current || !stompClient.current.connected) {
+            alert('WebSocket not connected.');
+            return;
+        }
+        if (!keys) return;
+        try {
+            const pkUrl = `${import.meta.env.VITE_API_URL}/api/v1/users/${recipientId}/public-key`;
+            const pkRes = await apiFetch(pkUrl);
+            if (!pkRes.ok) throw new Error('Could not fetch public key');
+            const pkText = await pkRes.text();
+            let latestPubKey = pkText;
+            try { latestPubKey = JSON.parse(pkText); } catch(e) {}
+
+            const aesKey = generateAESKey();
+            const encryptedAESKey = encryptAESKeyWithRSA(aesKey, latestPubKey);
+            const senderEncryptedAESKey = encryptAESKeyWithRSA(aesKey, keys.publicKey);
+            
+            const messagePayloadObj = {
+                text: '',
+                attachment: forwardingAttachment
+            };
+            
+            const encryptedData = encryptMessageWithAES(JSON.stringify(messagePayloadObj), aesKey);
+
+            const payload = {
+                recipientId: recipientId,
+                encryptedAESKey: encryptedAESKey,
+                senderEncryptedAESKey: senderEncryptedAESKey,
+                encryptedMessage: encryptedData.ciphertext,
+                iv: encryptedData.iv,
+                tag: encryptedData.tag
+            };
+
+            stompClient.current.publish({
+                destination: "/app/chat.sendMessage",
+                body: JSON.stringify(payload)
+            });
+            
+            if (activeFriend && activeFriend.userId === recipientId) {
+                setMessagesByFriend(prev => ({
+                    ...prev,
+                    [recipientId]: [...(prev[recipientId] || []), {
+                        id: Date.now(),
+                        sender: user.userId,
+                        content: '',
+                        attachment: forwardingAttachment,
+                        isMe: true,
+                        timestamp: new Date().toLocaleTimeString()
+                    }]
+                }));
+            }
+            alert('Forwarded successfully!');
+        } catch (e) {
+            console.error(e);
+            alert('Failed to forward attachment');
+        } finally {
+            setShowForwardModal(false);
+            setForwardingAttachment(null);
+        }
+    };
+
 
     useEffect(() => {
-        if (!activeFriend || !keys) return;
+        if (!(activeFriend || activeGroup) || !keys) return;
         
         const loadHistory = async () => {
+            const chatId = activeGroup ? activeGroup.groupId : activeFriend?.userId;
+            const isGroup = !!activeGroup;
+            if (!chatId) return;
+
             try {
-                const res = await apiFetch(`http://localhost:8080/api/v1/messages/${activeFriend.userId}`);
+                const endpoint = activeGroup 
+                    ? `${import.meta.env.VITE_API_URL}/api/v1/groups/${chatId}/messages`
+                    : `${import.meta.env.VITE_API_URL}/api/v1/messages/${chatId}`;
+                
+                const res = await apiFetch(endpoint);
                 if (res.ok) {
                     const history = await res.json();
-                    
-                    const decryptedHistory = history.map(m => {
-                        let content = "[Encrypted]";
-                        let attachment = null;
-                        try {
-                            const aesKeyToUse = (m.senderId === user.userId) ? m.senderEncryptedAesKey : m.encryptedAesKey;
-                            if (aesKeyToUse) {
-                                const aesKeyStr = decryptAESKeyWithRSA(aesKeyToUse, keys.privateKey);
-                                const rawEncrypted = m.encryptedContent || m.encryptedMessage;
-                                let encryptedData;
+                    const cachedUrls = {};
+                    const decryptedHistory = await Promise.all(history
+                        .filter(m => (m.encryptedContent || m.encrypted_content || m.encryptedMessage || m.encrypted_message) && m.iv && m.tag)
+                        .map(async (m) => {
+                            let content = "[Encrypted]";
+                            let attachment = null;
+                            const currentKeys = keysRef.current;
+
+                            // Defensive Property Normalization
+                            const isGroup = !!m.groupId || !!m.group_id;
+                            const rawKeysMap = m.wrappedKeys || m.wrapped_keys || m.wrappedKeyMap || {};
+                            
+                            // --- NEW UNWRAPPING LOGIC ---
+                            let actualKeysMap = rawKeysMap;
+                            if (rawKeysMap && rawKeysMap.type === 'json' && typeof rawKeysMap.value === 'string') {
                                 try {
-                                    encryptedData = typeof rawEncrypted === 'string' ? JSON.parse(rawEncrypted) : rawEncrypted;
-                                } catch(e) {
-                                    encryptedData = rawEncrypted;
+                                    actualKeysMap = JSON.parse(rawKeysMap.value);
+                                } catch (e) {
+                                    console.error("Failed to parse nested keysMap JSON string:", e);
                                 }
-                                
-                                const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
+                            } else if (typeof rawKeysMap === 'string') {
                                 try {
-                                    const parsed = JSON.parse(decryptedStr);
-                                    content = parsed.text || "";
-                                    attachment = parsed.attachment || null;
-                                } catch(e) {
-                                    content = decryptedStr; // Fallback for old plaintext messages
+                                    actualKeysMap = JSON.parse(rawKeysMap);
+                                } catch (e) {}
+                            }
+                            // ----------------------------
+
+                            const encryptedText = m.encryptedContent || m.encrypted_content || m.encryptedMessage || m.encrypted_message;
+                            const aesKeyToUse = isGroup 
+                                ? (actualKeysMap[user.userId]) 
+                                : (m.senderId === user.userId ? (m.senderEncryptedAesKey || m.sender_encrypted_aes_key) : (m.encryptedAesKey || m.encrypted_aes_key));
+
+                            // --- INJECTED DIAGNOSTIC LOGS ---
+                            // --------------------------------
+
+                            try {
+                                // Check cache first
+                                let aesKeyStr = m.id ? KeyCache.getKey(m.id) : null;
+
+                                if (!aesKeyStr && currentKeys && aesKeyToUse) {
+                                    aesKeyStr = decryptAESKeyWithRSA(aesKeyToUse, currentKeys.privateKey);
+                                    if (m.id) KeyCache.saveKey(m.id, aesKeyStr);
+                                }
+
+                                if (aesKeyStr) {
+                                    const encryptedData = {
+                                        ciphertext: encryptedText,
+                                        iv: m.iv,
+                                        tag: m.tag
+                                    };
+                                    
+                                    const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
+                                    try {
+                                        const parsed = JSON.parse(decryptedStr);
+                                        content = parsed.text || "";
+                                        attachment = parsed.attachment || null;
+                                    } catch(e) {
+                                        content = decryptedStr;
+                                    }
+                                } else {
+                                    content = "🔒 [Message could not be decrypted]";
+                                }
+                            } catch (e) {
+                                console.error("❌ [HISTORY PARSE] Historical decryption failed for msg:", m.id, e);
+                                content = "🔒 [Decryption Failed]";
+                            }
+
+                            // --- PERSISTENT CACHE CHECK ---
+                            if (attachment && m.id) {
+                                const cachedBlob = await getCachedFile(m.id);
+                                if (cachedBlob) {
+                                    cachedUrls[m.id] = URL.createObjectURL(cachedBlob);
                                 }
                             }
-                        } catch (e) {
-                            console.warn("Decryption failed for message", m.id, e);
-                            content = "🔒 [Decryption Failed]";
-                        }
-                        return {
-                            ...m,
-                            id: m.id || `msg-${Math.random()}`,
-                            sender: m.senderId,
-                            content,
-                            attachment,
-                            isMe: m.senderId === user.userId,
-                            timestamp: new Date(m.timestamp).toLocaleTimeString()
-                        };
-                    });
+
+                            return {
+                                ...m,
+                                id: m.id || `msg-${Math.random()}`,
+                                sender: m.senderId,
+                                content,
+                                attachment,
+                                isMe: m.senderId === user.userId,
+                                rawTimestamp: m.timestamp,
+                                displayTimestamp: new Date(m.timestamp).toLocaleTimeString()
+                            };
+                        }));
+
+                    // Bulk update cached file URLs
+                    if (Object.keys(cachedUrls).length > 0) {
+                        setDecryptedFiles(prev => ({ ...prev, ...cachedUrls }));
+                    }
 
                     setMessagesByFriend(prev => ({
                         ...prev,
-                        [activeFriend.userId]: decryptedHistory
+                        [chatId]: decryptedHistory
                     }));
                     
-                    // Clear unread for the friend we just opened
-                    setUnreadCounts(prev => ({ ...prev, [activeFriend.userId]: 0 }));
+                    // Clear unread for the chat we just opened
+                    if (activeGroup) {
+                        apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${chatId}/read`, { method: 'POST' });
+                        // Also refresh the roster to get latest lastRead timestamps for others
+                        fetchGroupRoster(chatId);
+                    }
                     
-                    // Mark as read in local storage to prevent badges from showing again on refresh
-                    localStorage.setItem(`lastRead_${activeFriend.userId}`, new Date().toISOString());
+                    setUnreadCounts(prev => ({ ...prev, [chatId]: 0 }));
+                    localStorage.setItem(`lastRead_${chatId}`, new Date().toISOString());
                 }
             } catch (e) {
                 console.error("Failed to load history", e);
@@ -247,13 +516,13 @@ const Chat = () => {
         };
         
         loadHistory();
-    }, [activeFriend, keys]);
+    }, [activeFriend, activeGroup, keys]);
 
     const fetchSocialData = async () => {
         try {
             const [friendsRes, requestsRes] = await Promise.all([
-                apiFetch('http://localhost:8080/api/v1/friends'),
-                apiFetch('http://localhost:8080/api/v1/friends/requests')
+                apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends`),
+                apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends/requests`)
             ]);
             
             let friendsList = [];
@@ -263,20 +532,28 @@ const Chat = () => {
             }
             if (requestsRes.ok) setRequests(await requestsRes.json());
             
-            // After loading friends, check each one for unread messages
-            fetchAllUnreadCounts(friendsList);
+            // Gated Admin Fetch: Ensure only admins hit the admin endpoint. Fallback to user-groups for standard users.
+            const groupsEndpoint = user?.role === 'ROLE_ADMIN' 
+                ? `${import.meta.env.VITE_API_URL}/api/v1/admin/groups`
+                : `${import.meta.env.VITE_API_URL}/api/v1/groups/my-groups`;
+
+            const groupsRes = await apiFetch(groupsEndpoint);
+            const groupsList = groupsRes.ok ? await groupsRes.json() : [];
+            setGroups(groupsList);
+            
+            // After loading friends and groups, check each for unread messages
+            fetchAllUnreadCounts(friendsList, groupsList);
         } catch (e) {
             console.error("Failed to fetch social data", e);
         }
     };
 
-    // Load message counts for all friends to show unread badges in sidebar
-    const fetchAllUnreadCounts = async (friendsList) => {
-        if (!friendsList || friendsList.length === 0 || !keys) return;
+    const fetchAllUnreadCounts = async (friendsList, groupsList = []) => {
+        if (!keys) return;
         
         for (const friend of friendsList) {
             try {
-                const res = await apiFetch(`http://localhost:8080/api/v1/messages/${friend.userId}`);
+                const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/messages/${friend.userId}`);
                 if (res.ok) {
                     const history = await res.json();
                     
@@ -318,6 +595,44 @@ const Chat = () => {
                 // silently skip if one friend fails
             }
         }
+        for (const group of groupsList) {
+            try {
+                const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${group.groupId}/messages`);
+                if (res.ok) {
+                    const history = await res.json();
+                    
+                    // 1. Get the user's personal lastRead from roster or fallback to localStorage
+                    let lastReadStr = localStorage.getItem(`lastRead_${group.groupId}`);
+                    
+                    // Try to find the user's lastReadAt from the roster if available
+                    const roster = groupRosterKeys[group.groupId] || [];
+                    const me = roster.find(m => m.userId === user.userId);
+                    if (me && me.lastReadAt) {
+                        lastReadStr = me.lastReadAt;
+                    }
+
+                    if (!lastReadStr) {
+                        lastReadStr = new Date().toISOString();
+                        localStorage.setItem(`lastRead_${group.groupId}`, lastReadStr);
+                    }
+
+                    const lastReadTime = new Date(lastReadStr).getTime();
+
+                    // 2. Count messages sent AFTER my lastRead
+                    const unreadCount = history.filter(m => 
+                        m.senderId !== user.userId && 
+                        new Date(m.timestamp).getTime() > lastReadTime
+                    ).length;
+
+                    setUnreadCounts(prev => ({
+                        ...prev,
+                        [group.groupId]: unreadCount
+                    }));
+                }
+            } catch (e) {
+                // silently skip
+            }
+        }
     };
 
     const handleSearch = async (query) => {
@@ -327,7 +642,7 @@ const Chat = () => {
             return;
         }
         try {
-            const res = await apiFetch(`http://localhost:8080/api/v1/users/search?query=${query}`);
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/users/search?query=${query}`);
             if (res.ok) {
                 const data = await res.json();
                 setSearchResults(data);
@@ -340,7 +655,7 @@ const Chat = () => {
     const sendFriendRequest = async (targetUsername) => {
         if (!targetUsername) return;
         try {
-            const res = await apiFetch(`http://localhost:8080/api/v1/friends/request/${targetUsername}`, {
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends/request/${targetUsername}`, {
                 method: 'POST'
             });
             if (res.ok) {
@@ -358,7 +673,7 @@ const Chat = () => {
 
     const acceptRequest = async (requestId) => {
         try {
-            const res = await apiFetch(`http://localhost:8080/api/v1/friends/accept/${requestId}`, {
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends/accept/${requestId}`, {
                 method: 'POST'
             });
             if (res.ok) {
@@ -371,20 +686,37 @@ const Chat = () => {
     };
 
     const connectWebSocket = () => {
-        if (stompClient.current && stompClient.current.connected) return;
+        if (stompClient.current && (stompClient.current.connected || stompClient.current.active)) return;
         
-        const socket = new SockJS('http://localhost:8080/ws');
-        const client = Stomp.over(socket);
+        const client = Stomp.over(() => new SockJS(import.meta.env.VITE_WS_URL));
         client.debug = () => {}; 
 
-        client.connect({ 'Authorization': 'Bearer ' + user.accessToken }, () => {
+        // Resilience settings
+        client.reconnectDelay = 5000;
+        client.heartbeat.outgoing = 10000;
+        client.heartbeat.incoming = 10000;
+
+        client.onConnect = () => {
             setStatus('Connected securely');
-            client.subscribe(`/topic/messages/${user.userId}`, (msg) => {
+            client.subscribe(`/topic/messages.${user.userId}`, (msg) => {
                 const receivedPayload = JSON.parse(msg.body);
                 handleIncomingMessage(receivedPayload);
             });
-        }, (error) => {
-            setStatus('Connection error');
+        };
+
+        client.onStompError = (frame) => {
+            console.error('Broker reported error: ' + frame.headers['message']);
+            setStatus('Reconnecting...');
+        };
+
+        client.onWebSocketClose = () => {
+            if (stompClient.current?.active) {
+                setStatus('Reconnecting...');
+            }
+        };
+
+        client.connect({ 'Authorization': 'Bearer ' + user.accessToken }, client.onConnect, (error) => {
+            setStatus('Reconnecting...');
         });
 
         stompClient.current = client;
@@ -398,61 +730,175 @@ const Chat = () => {
 
     const processedMessages = useRef(new Set());
     const handleIncomingMessage = (payload) => {
-        // Prevent duplicate processing of the same message
-        if (payload.id && processedMessages.current.has(payload.id)) return;
-        if (payload.id) processedMessages.current.add(payload.id);
+        // 0. Defensive Normalization (Handle snake_case vs camelCase)
+        const senderId = payload.senderId || payload.sender_id;
+        const groupId = payload.groupId || payload.group_id;
+        const wrappedKeys = payload.wrappedKeys || payload.wrapped_keys;
+        const encryptedContent = payload.encryptedContent || payload.encryptedMessage || payload.encrypted_message;
+        const iv = payload.iv;
+        const tag = payload.tag;
+        const messageId = payload.id || payload.messageId || payload.message_id;
+
+        // 1. Handle TYPE_RECEIPT packets or live sync broadcasts
+        if ((messageId && payload.status) || payload.type === 'RECEIPT_UPDATE' || payload.lastReadAt || groupId) {
+            
+            // LOG: Live Packet Hit
+
+            // A. Group Receipts: Update the roster timestamps for real-time tick calculation
+            if (groupId) {
+                const receiptTime = payload.timestamp || payload.lastReadAt || new Date().toISOString();
+                const readerId = payload.recipientId || payload.userId || payload.senderId;
+
+                // Update global roster cache (Source of truth for message ticks)
+                setGroupRosterKeys(prev => {
+                    const roster = prev[groupId] || [];
+                    
+                    const updatedRoster = roster.map(m => {
+                        const mId = m.userId || m.id || m.user_id;
+                        if (mId === readerId) {
+                            return { ...m, lastReadAt: receiptTime, last_read_at: receiptTime };
+                        }
+                        return m;
+                    });
+                    return { ...prev, [groupId]: updatedRoster };
+                });
+
+                // Update active group if currently viewed
+                setActiveGroup(prevGroup => {
+                    if (!prevGroup || (prevGroup.groupId !== groupId && prevGroup.id !== groupId)) return prevGroup;
+
+                    const updatedMembers = (prevGroup.members || prevGroup.roster || []).map(member => {
+                        const mId = member.userId || member.id || member.user_id;
+                        if (mId === readerId) {
+                            return { ...member, lastReadAt: receiptTime, last_read_at: receiptTime };
+                        }
+                        return member;
+                    });
+                    return { ...prevGroup, members: updatedMembers };
+                });
+
+                // Force React to redraw the chat bubbles live so ticks light up
+                setMessagesByFriend(prev => {
+                    if (!prev[groupId]) return prev;
+                    return { ...prev, [groupId]: [...prev[groupId]] };
+                });
+
+                return; // Sever the global status update for group messages
+            }
+
+            // B. Private Receipts: Update the message status directly for 1-on-1 chats
+            const chatId = payload.recipientId === user.userId ? senderId : payload.recipientId;
+            setMessagesByFriend(prev => {
+                const chatHistory = prev[chatId] || [];
+                const updatedHistory = chatHistory.map(msg => 
+                    msg.id === messageId ? { ...msg, status: payload.status } : msg
+                );
+                return { ...prev, [chatId]: updatedHistory };
+            });
+            return;
+        }
+
+        // 2. Prevent duplicate processing of the same message
+        if (messageId && processedMessages.current.has(messageId)) return;
+        
+        // 3. Filter out self-echos from group broadcasts
+        if (senderId === user.userId) return;
+
+        if (messageId) processedMessages.current.add(messageId);
 
         let decryptedContent = '🔒 [Message could not be decrypted]';
         let attachment = null;
+        const currentKeys = keysRef.current;
+
         try {
-            const aesKeyStr = decryptAESKeyWithRSA(payload.encryptedAESKey, keys.privateKey);
-            let encryptedData;
-            try {
-                encryptedData = typeof payload.encryptedMessage === 'string' ? JSON.parse(payload.encryptedMessage) : payload.encryptedMessage;
-            } catch(e) {
-                encryptedData = payload.encryptedMessage;
+            // Check cache first
+            let aesKeyStr = messageId ? KeyCache.getKey(messageId) : null;
+
+            if (!aesKeyStr && currentKeys) {
+                // PIVOT: Determine if we are in a Group N-Wrap context or Private context
+                const wrappedKey = groupId 
+                    ? (wrappedKeys ? wrappedKeys[user.userId] : null)
+                    : payload.encryptedAESKey;
+
+                if (wrappedKey) {
+                    aesKeyStr = decryptAESKeyWithRSA(wrappedKey, currentKeys.privateKey);
+                    if (messageId) KeyCache.saveKey(messageId, aesKeyStr);
+                }
             }
 
-            const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
-            try {
-                const parsed = JSON.parse(decryptedStr);
-                decryptedContent = parsed.text || "";
-                attachment = parsed.attachment || null;
-            } catch(e) {
-                decryptedContent = decryptedStr;
+            if (aesKeyStr) {
+                const encryptedData = {
+                    ciphertext: encryptedContent,
+                    iv: iv,
+                    tag: tag
+                };
+
+                const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
+                try {
+                    const parsed = JSON.parse(decryptedStr);
+                    decryptedContent = parsed.text || "";
+                    attachment = parsed.attachment || null;
+                } catch(e) {
+                    decryptedContent = decryptedStr;
+                }
             }
         } catch (error) {
             console.error('Decryption failed', error);
             decryptedContent = "🔒 [Decryption Failed]";
         }
 
+        const chatId = payload.groupId || payload.senderId;
+
         setMessagesByFriend(prev => ({
             ...prev,
-            [payload.senderId]: [...(prev[payload.senderId] || []), {
+            [chatId]: [...(prev[chatId] || []), {
                 id: payload.id || Date.now(),
                 sender: payload.senderId,
                 content: decryptedContent,
                 attachment: attachment,
                 isMe: false,
-                timestamp: new Date().toLocaleTimeString()
+                status: 'SENT',
+                rawTimestamp: payload.timestamp || new Date().toISOString(),
+                displayTimestamp: new Date().toLocaleTimeString()
             }]
         }));
 
-        // If we are NOT viewing this sender's chat, mark as unread + show toast
-        const currentActiveFriend = activeFriendRef.current;
-        if (!currentActiveFriend || currentActiveFriend.userId !== payload.senderId) {
+        // If we are NOT viewing this chat, mark as unread + show toast
+        const isCurrentChat = activeGroup 
+            ? activeGroup.groupId === payload.groupId 
+            : activeFriendRef.current?.userId === payload.senderId && !payload.groupId;
+
+        if (!isCurrentChat) {
             setUnreadCounts(prev => ({
                 ...prev,
-                [payload.senderId]: (prev[payload.senderId] || 0) + 1
+                [chatId]: (prev[chatId] || 0) + 1
             }));
 
-            // Find sender name from friends list for the toast
-            const senderFriend = friends.find(f => f.userId === payload.senderId);
-            const senderName = senderFriend ? senderFriend.username : 'Someone';
+            let senderName = 'Someone';
+            if (payload.groupId) {
+                const group = groups.find(g => g.groupId === payload.groupId);
+                senderName = group ? `Group: ${group.name}` : 'Group Message';
+            } else {
+                const senderFriend = friends.find(f => f.userId === payload.senderId);
+                senderName = senderFriend ? senderFriend.username : 'Someone';
+            }
             showToast(senderName, attachment ? '📁 Sent an attachment' : decryptedContent);
         } else {
-            // We are actively viewing this chat, so mark the newly received message as read instantly
-            localStorage.setItem(`lastRead_${payload.senderId}`, new Date().toISOString());
+            // Mark as read locally
+            localStorage.setItem(`lastRead_${chatId}`, new Date().toISOString());
+            
+            // Send Read Receipt for 1-on-1 chats
+            if (!payload.groupId && stompClient.current?.connected) {
+                stompClient.current.publish({
+                    destination: '/app/chat.receipt',
+                    body: JSON.stringify({
+                        messageId: messageId,
+                        senderId: senderId,
+                        recipientId: user.userId,
+                        status: 'READ'
+                    })
+                });
+            }
         }
     };
 
@@ -500,21 +946,29 @@ const Chat = () => {
     };
 
     const sendMessage = async () => {
-        if ((!inputMsg.trim() && !selectedFile) || !activeFriend || !stompClient.current) return;
+        const activeContext = activeFriend || activeGroup;
+        if ((!inputMsg.trim() && !selectedFile) || !activeContext || !stompClient.current) return;
 
         try {
             setIsUploading(true);
-            const pkUrl = `http://localhost:8080/api/v1/users/${activeFriend.userId}/public-key`;
-            const pkRes = await apiFetch(pkUrl);
-            if (!pkRes.ok) {
-                alert("Could not fetch recipient's latest public key.");
-                setIsUploading(false);
-                return;
-            }
             
-            const pkText = await pkRes.text();
-            let latestPubKey = pkText;
-            try { latestPubKey = JSON.parse(pkText); } catch(e) {}
+            let latestPubKey = null;
+            let groupRoster = null;
+
+            if (activeFriend) {
+                const pkUrl = `${import.meta.env.VITE_API_URL}/api/v1/users/${activeFriend.userId}/public-key`;
+                const pkRes = await apiFetch(pkUrl);
+                if (!pkRes.ok) throw new Error("Could not fetch recipient public key");
+                const pkText = await pkRes.text();
+                try { latestPubKey = JSON.parse(pkText); } catch(e) { latestPubKey = pkText; }
+            } else {
+                groupRoster = groupRosterKeys[activeGroup.groupId] || [];
+                if (groupRoster.length === 0) {
+                    const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/roster-keys`);
+                    groupRoster = await res.json();
+                    setGroupRosterKeys(prev => ({ ...prev, [activeGroup.groupId]: groupRoster }));
+                }
+            }
 
             let attachmentData = null;
             if (selectedFile) {
@@ -528,7 +982,7 @@ const Chat = () => {
                 const formData = new FormData();
                 formData.append('file', blob, selectedFile.name + '.enc');
                 
-                const uploadRes = await fetch('http://localhost:8080/api/v1/attachments/upload', {
+                const uploadRes = await fetch(`${import.meta.env.VITE_API_URL}/api/v1/attachments/upload`, {
                     method: 'POST',
                     headers: {
                         'Authorization': 'Bearer ' + user.accessToken
@@ -549,9 +1003,6 @@ const Chat = () => {
             }
 
             const aesKey = generateAESKey();
-            const encryptedAESKey = encryptAESKeyWithRSA(aesKey, latestPubKey);
-            const senderEncryptedAESKey = encryptAESKeyWithRSA(aesKey, keys.publicKey);
-            
             const messagePayloadObj = {
                 text: inputMsg,
                 attachment: attachmentData
@@ -559,29 +1010,96 @@ const Chat = () => {
             
             const encryptedData = encryptMessageWithAES(JSON.stringify(messagePayloadObj), aesKey);
 
-            const payload = {
-                recipientId: activeFriend.userId,
-                encryptedAESKey: encryptedAESKey,
-                senderEncryptedAESKey: senderEncryptedAESKey,
-                encryptedMessage: JSON.stringify(encryptedData)
-            };
+            if (activeFriend) {
+                const encryptedAESKey = encryptAESKeyWithRSA(aesKey, latestPubKey);
+                const senderEncryptedAESKey = encryptAESKeyWithRSA(aesKey, keys.publicKey);
+                
+                const payload = {
+                    recipientId: activeFriend.userId,
+                    encryptedAESKey: encryptedAESKey,
+                    senderEncryptedAESKey: senderEncryptedAESKey,
+                    encryptedContent: encryptedData.ciphertext,
+                    iv: encryptedData.iv,
+                    tag: encryptedData.tag
+                };
 
-            stompClient.current.send("/app/chat.sendMessage", {}, JSON.stringify(payload));
+                stompClient.current.publish({
+                    destination: "/app/chat.sendMessage",
+                    body: JSON.stringify(payload)
+                });
+            } else if (activeGroup) {
+                const wrappedKeys = {};
+                
+                // 1. Get the current roster from state
+                let roster = groupRosterKeys[activeGroup.groupId] || [];
+                
+                // 2. Force-fetch the roster if not available in current state
+                if (roster.length === 0) {
+                    try {
+                        const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/roster-keys`);
+                        if (res.ok) {
+                            roster = await res.json();
+                            setGroupRosterKeys(prev => ({ ...prev, [activeGroup.groupId]: roster }));
+                        }
+                    } catch (e) {
+                        console.error("Critical: Failed to fetch group roster", e);
+                    }
+                }
 
+                // 3. Perform Async-Safe N-Wrap distribution
+                if (roster && roster.length > 0) {
+                    await Promise.all(roster.map(async (member) => {
+                        const mId = member.userId || member.id;
+                        const pubKey = member.publicKey || member.public_key;
+                        
+                        if (mId && pubKey) {
+                            try {
+                                wrappedKeys[mId] = encryptAESKeyWithRSA(aesKey, pubKey);
+                            } catch (e) {
+                            }
+                        }
+                    }));
+                }
+
+                // 3. Defensive Guard: Prevent sending un-decryptable packets
+                if (Object.keys(wrappedKeys).length === 0) {
+                    console.error("🛑 [CRYPTO ERROR]: wrappedKeys map is empty. Message will be un-decryptable for all members. Aborting publish.");
+                    setIsUploading(false);
+                    return;
+                }
+
+                const groupPayload = {
+                    groupId: activeGroup.groupId,
+                    senderId: user.userId,
+                    encryptedContent: encryptedData.ciphertext,
+                    iv: encryptedData.iv,
+                    tag: encryptedData.tag,
+                    wrappedKeys: wrappedKeys
+                };
+
+                stompClient.current.publish({
+                    destination: "/app/chat.groupMessage",
+                    body: JSON.stringify(groupPayload)
+                });
+            }
+
+            const chatId = activeGroup ? activeGroup.groupId : activeFriend.userId;
             setMessagesByFriend(prev => ({
                 ...prev,
-                [activeFriend.userId]: [...(prev[activeFriend.userId] || []), {
+                [chatId]: [...(prev[chatId] || []), {
                     id: Date.now(),
                     sender: user.userId,
                     content: inputMsg,
                     attachment: attachmentData,
                     isMe: true,
+                    status: 'SENT',
                     timestamp: new Date().toLocaleTimeString()
                 }]
             }));
             
             setInputMsg('');
             setSelectedFile(null);
+            if (fileInputRef.current) fileInputRef.current.value = "";
             setIsUploading(false);
         } catch (error) {
             console.error("Encryption/Upload failed", error);
@@ -614,6 +1132,9 @@ const Chat = () => {
                 <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
                     <button onClick={() => setActiveTab('friends')} style={{ background: 'none', border: 'none', color: activeTab === 'friends' ? 'var(--text-highlight)' : '#888', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
                         <Users size={16} /> Friends
+                    </button>
+                    <button onClick={() => setActiveTab('groups')} style={{ background: 'none', border: 'none', color: activeTab === 'groups' ? 'var(--text-highlight)' : '#888', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        <Users size={16} /> Groups
                     </button>
                     <button onClick={() => setActiveTab('requests')} style={{ background: 'none', border: 'none', color: activeTab === 'requests' ? 'var(--text-highlight)' : '#888', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', position: 'relative' }}>
                         <Bell size={16} /> Requests
@@ -708,14 +1229,60 @@ const Chat = () => {
                             ))}
                         </div>
                     )}
+
+                    {activeTab === 'groups' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                            <button 
+                                onClick={() => setShowCreateGroupModal(true)}
+                                className="glass-button" 
+                                style={{ width: '100%', marginBottom: '10px', background: 'rgba(0, 255, 136, 0.1)', color: '#00ff88', border: '1px solid rgba(0, 255, 136, 0.3)' }}
+                            >
+                                <Users size={16} style={{ marginRight: '8px' }} /> Create Group
+                            </button>
+                            {groups.length === 0 ? <div style={{ color: '#888', fontSize: '14px', textAlign: 'center', marginTop: '20px' }}>No groups yet.</div> : null}
+                            {groups.map(group => (
+                                <div 
+                                    key={group.groupId} 
+                                    onClick={() => setActiveGroup(group)}
+                                    style={{ 
+                                        display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', borderRadius: '8px', cursor: 'pointer',
+                                        background: activeGroup?.groupId === group.groupId ? 'rgba(102, 252, 241, 0.1)' : 'transparent',
+                                        border: activeGroup?.groupId === group.groupId ? '1px solid rgba(102, 252, 241, 0.3)' : '1px solid transparent'
+                                    }}
+                                >
+                                    <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #00ff88, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
+                                        {group.name?.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: '14px', color: 'var(--text-highlight)' }}>{group.name}</div>
+                                        <div style={{ fontSize: '11px', color: '#888' }}>{group.memberCount} members</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
 
                 <div style={{ marginTop: '20px' }}>
-                    <div style={{ fontSize: '12px', color: status.includes('Connected') ? '#00ff88' : '#ffcc00', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: status.includes('Connected') ? '#00ff88' : '#ffcc00' }} />
+                    <div style={{ 
+                        fontSize: '12px', 
+                        color: status === 'Connected securely' ? '#00ff88' : '#ffcc00', 
+                        marginBottom: '15px', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '5px' 
+                    }}>
+                        <div style={{ 
+                            width: '8px', 
+                            height: '8px', 
+                            borderRadius: '50%', 
+                            background: status === 'Connected securely' ? '#00ff88' : '#ffcc00',
+                            boxShadow: status === 'Connected securely' ? '0 0 8px rgba(0,255,136,0.6)' : '0 0 8px rgba(255,204,0,0.6)',
+                            animation: status === 'Reconnecting...' ? 'pulse 1s infinite' : 'none'
+                        }} />
                         {status}
                     </div>
-                    <button onClick={() => { logout(); navigate('/'); }} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(255,107,107,0.1)', color: '#ff6b6b' }}>
+                    <button onClick={() => { logout(); purgePramaCache(); navigate('/'); }} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(255,107,107,0.1)', color: '#ff6b6b' }}>
                         <LogOut size={18} /> Logout
                     </button>
                 </div>
@@ -725,36 +1292,112 @@ const Chat = () => {
             <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)' }}>
                     <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        {activeFriend ? (
+                        {activeFriend || activeGroup ? (
                             <>
                                 <div style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px' }}>
-                                    {activeFriend.username?.charAt(0).toUpperCase()}
+                                    {(activeFriend?.username || activeGroup?.name)?.charAt(0).toUpperCase()}
                                 </div>
-                                Secure Chat with {activeFriend.username}
+                                Secure Chat with {activeFriend?.username || activeGroup?.name}
                             </>
-                        ) : 'Select a friend to start messaging'}
+                        ) : 'Select a chat to start messaging'}
                     </h3>
                 </div>
 
                 <div style={{ flex: 1, padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                    {(messagesByFriend[activeFriend?.userId] || []).map(msg => (
-                        <div key={msg.id} style={{ alignSelf: msg.isMe ? 'flex-end' : 'flex-start', maxWidth: '70%' }}>
+                    {(messagesByFriend[activeGroup?.groupId || activeFriend?.userId] || []).map(msg => {
+                        const isMe = msg.isMe;
+                        let senderName = "Unknown User";
+                        if (!isMe && activeGroup) {
+                            const roster = groupRosterKeys[activeGroup.groupId] || [];
+                            const sender = roster.find(m => m.userId === msg.senderId || m.id === msg.senderId);
+                            if (sender) senderName = sender.username;
+                        }
+
+                        // Calculate dynamic status for Group Messages
+                        let displayStatus = msg.status;
+                        if (isMe && activeGroup) {
+                            const roster = groupRosterKeys[activeGroup.groupId] || [];
+                            const others = roster.filter(m => m.userId !== user.userId);
+                            const msgTime = new Date(msg.createdAt || msg.timestamp || msg.rawTimestamp).getTime();
+                            
+                            // "READ" if EVERY other member has a lastReadAt >= msgTime
+                            const allRead = others.length > 0 && others.every(m => {
+                                const readAtStr = m.lastReadAt || m.last_read_at;
+                                if (!readAtStr) {
+                                    return false;
+                                }
+                                
+                                const memberReadTime = new Date(readAtStr).getTime();
+                                const msgTime = new Date(msg.createdAt || msg.timestamp || msg.rawTimestamp).getTime();
+                                
+                                const evaluation = memberReadTime >= msgTime;
+                                
+                                return evaluation;
+                            });
+
+                            // "DELIVERED" if at least one other member has a lastReadAt (implied delivery)
+                            const someRead = others.some(m => {
+                                const readAtStr = m.lastReadAt || m.last_read_at;
+                                if (!readAtStr) return false;
+                                const memberReadTime = new Date(readAtStr).getTime();
+                                return memberReadTime >= msgTime;
+                            });
+
+                            displayStatus = allRead ? 'READ' : (someRead ? 'DELIVERED' : 'SENT');
+                        }
+
+                        return (
+                        <div key={msg.id} style={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: '70%' }}>
+                            {!isMe && activeGroup && (
+                                <div style={{ fontSize: '12px', color: '#00ff88', marginBottom: '4px', marginLeft: '4px', fontWeight: 'bold' }}>
+                                    {senderName}
+                                </div>
+                            )}
                             <div style={{ 
                                 padding: '12px 16px', 
-                                borderRadius: msg.isMe ? '16px 16px 0 16px' : '16px 16px 16px 0',
-                                background: msg.isMe ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
-                                color: msg.isMe ? '#000' : 'var(--text-main)',
+                                borderRadius: isMe ? '16px 16px 0 16px' : '16px 16px 16px 0',
+                                background: isMe ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
+                                color: isMe ? '#000' : 'var(--text-main)',
                                 boxShadow: '0 2px 10px rgba(0,0,0,0.1)'
                             }}>
                                 {msg.content}
-                                {msg.attachment && <AttachmentViewer attachment={msg.attachment} />}
+                                {msg.attachment && (
+                                    <AttachmentViewer 
+                                        attachment={msg.attachment} 
+                                        messageId={msg.id}
+                                        onImageClick={(fileObj) => setSelectedImage(fileObj)}
+                                        attachmentCache={attachmentCache}
+                                        setAttachmentCache={setAttachmentCache}
+                                        onForward={(att) => { setForwardingAttachment(att); setShowForwardModal(true); }}
+                                        decryptedFiles={decryptedFiles}
+                                        setDecryptedFiles={setDecryptedFiles}
+                                    />
+                                )}
                             </div>
-                            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', textAlign: msg.isMe ? 'right' : 'left' }}>
-                                {msg.timestamp}
+                            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: isMe ? 'flex-end' : 'flex-start', gap: '4px' }}>
+                                {msg.displayTimestamp}
+                                {isMe && (
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        {displayStatus === 'SENT' && <Check size={12} color="#666" />}
+                                        {displayStatus === 'DELIVERED' && (
+                                            <div style={{ display: 'flex', marginLeft: '-6px' }}>
+                                                <Check size={12} color="#666" />
+                                                <Check size={12} color="#666" style={{ marginLeft: '-8px' }} />
+                                            </div>
+                                        )}
+                                        {displayStatus === 'READ' && (
+                                            <div style={{ display: 'flex', marginLeft: '-6px' }}>
+                                                <Check size={12} color="#00ff88" />
+                                                <Check size={12} color="#00ff88" style={{ marginLeft: '-8px' }} />
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
-                    ))}
-                    {(!activeFriend || (messagesByFriend[activeFriend.userId] || []).length === 0) && activeFriend && (
+                        );
+                    })}
+                    {(!(activeFriend || activeGroup) || (messagesByFriend[activeGroup?.groupId || activeFriend?.userId] || []).length === 0) && (activeFriend || activeGroup) && (
                         <div style={{ margin: 'auto', color: '#888', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
                             <ShieldCheck size={48} color="rgba(102, 252, 241, 0.3)" />
                             <span>Messages are end-to-end encrypted. No one else can read them.</span>
@@ -781,7 +1424,7 @@ const Chat = () => {
                         <button 
                             onClick={() => fileInputRef.current.click()} 
                             className="glass-button" 
-                            disabled={!activeFriend || isUploading}
+                            disabled={!(activeFriend || activeGroup) || isUploading}
                             title="Attach File"
                         >
                             <Paperclip size={20} />
@@ -789,7 +1432,7 @@ const Chat = () => {
                         <button 
                             onClick={openCamera} 
                             className="glass-button" 
-                            disabled={!activeFriend || isUploading}
+                            disabled={!(activeFriend || activeGroup) || isUploading}
                             title="Take Photo"
                         >
                             <Camera size={20} />
@@ -797,13 +1440,13 @@ const Chat = () => {
                         <input 
                             type="text" 
                             className="glass-input" 
-                            placeholder="Type an encrypted message..." 
+                            placeholder={activeFriend || activeGroup ? "Type a secure message..." : "Select a chat to start..."}
                             value={inputMsg}
                             onChange={e => setInputMsg(e.target.value)}
                             onKeyPress={e => e.key === 'Enter' && sendMessage()}
-                            disabled={!activeFriend || isUploading}
+                            disabled={!(activeFriend || activeGroup) || isUploading}
                         />
-                        <button onClick={sendMessage} className="glass-button" disabled={!activeFriend || isUploading || (!inputMsg.trim() && !selectedFile)}>
+                        <button onClick={sendMessage} className="glass-button" disabled={!(activeFriend || activeGroup) || isUploading || (!inputMsg.trim() && !selectedFile)}>
                             {isUploading ? <Loader className="spin" size={20} /> : <Send size={20} />}
                         </button>
                     </div>
@@ -883,6 +1526,232 @@ const Chat = () => {
                             <Camera size={24} style={{ marginRight: '10px' }} />
                             Capture Photo
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Forward Modal */}
+            {showForwardModal && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.8)',
+                    backdropFilter: 'blur(5px)',
+                    zIndex: 10000,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                }} onClick={() => setShowForwardModal(false)}>
+                    <div style={{
+                        background: 'var(--panel-bg)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '16px',
+                        padding: '20px',
+                        width: '90%',
+                        maxWidth: '400px',
+                        maxHeight: '70vh',
+                        display: 'flex',
+                        flexDirection: 'column'
+                    }} onClick={e => e.stopPropagation()}>
+                        <h3 style={{ margin: '0 0 20px 0', color: 'var(--text-highlight)' }}>Forward to...</h3>
+                        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                            {friends.filter(f => f.userId !== activeFriend?.userId).length === 0 ? (
+                                <div style={{ color: '#888', textAlign: 'center', padding: '20px' }}>No other friends to forward to.</div>
+                            ) : null}
+                            {friends.filter(f => f.userId !== activeFriend?.userId).map(friend => (
+                                <div 
+                                    key={friend.id} 
+                                    onClick={() => executeForward(friend.userId)}
+                                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', cursor: 'pointer' }}
+                                >
+                                    <div style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
+                                        {friend.username?.charAt(0).toUpperCase()}
+                                    </div>
+                                    <span style={{ color: '#fff', fontSize: '14px' }}>{friend.username}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <button 
+                            onClick={() => setShowForwardModal(false)}
+                            style={{ marginTop: '20px', padding: '10px', background: 'rgba(255,107,107,0.1)', color: '#ff6b6b', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Full Screen Image Modal */}
+            {selectedImage && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.95)',
+                    backdropFilter: 'blur(15px)',
+                    zIndex: 11000,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '40px'
+                }} onClick={() => setSelectedImage(null)}>
+                    <button 
+                        onClick={() => setSelectedImage(null)}
+                        style={{ position: 'absolute', top: '30px', right: '30px', background: 'rgba(0,0,0,0.5)', border: 'none', color: '#fff', cursor: 'pointer', padding: '10px', borderRadius: '50%', zIndex: 12000 }}
+                    >
+                        <X size={32} />
+                    </button>
+                    
+                    {selectedImage.type?.startsWith('image/') ? (
+                        <img 
+                            src={selectedImage.url} 
+                            alt="Full Screen" 
+                            style={{ maxWidth: '100%', maxHeight: '100%', borderRadius: '12px', boxShadow: '0 0 50px rgba(0,0,0,0.8)' }} 
+                        />
+                    ) : selectedImage.type === 'application/pdf' ? (
+                        <iframe 
+                            src={selectedImage.url} 
+                            style={{ width: '90%', height: '90%', border: 'none', borderRadius: '12px', background: '#fff' }}
+                            title="File Preview"
+                        />
+                    ) : (
+                        <div style={{ textAlign: 'center', color: '#fff', background: 'rgba(255,255,255,0.05)', padding: '40px', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                            <FileIcon size={64} style={{ color: '#00ff88', marginBottom: '20px' }} />
+                            <h3 style={{ fontSize: '24px', marginBottom: '10px' }}>Preview Not Available</h3>
+                            <p style={{ color: '#aaa', marginBottom: '30px' }}>This file type ({selectedImage.name?.split('.').pop()?.toUpperCase()}) needs to be opened in its own app.</p>
+                            <button 
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    const link = document.createElement('a');
+                                    link.href = selectedImage.url;
+                                    link.download = selectedImage.name || 'decrypted_file';
+                                    document.body.appendChild(link);
+                                    link.click();
+                                    document.body.removeChild(link);
+                                }}
+                                style={{ padding: '15px 30px', background: '#00ff88', color: '#000', border: 'none', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+                            >
+                                Download & Open {selectedImage.name?.split('.').pop()?.toUpperCase()}
+                            </button>
+                        </div>
+                    )}
+
+                    <div style={{ position: 'absolute', bottom: '30px', left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: '15px' }}>
+                         <button 
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const link = document.createElement('a');
+                                link.href = selectedImage.url;
+                                link.download = selectedImage.name || 'decrypted_file';
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                            }}
+                            className="glass-button"
+                            style={{ padding: '12px 24px', background: 'var(--accent)', color: '#000', borderRadius: '12px' }}
+                        >
+                            <Download size={18} style={{ marginRight: '10px' }} />
+                            Save to Computer
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Create Group Modal */}
+            {showCreateGroupModal && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.85)',
+                    backdropFilter: 'blur(10px)',
+                    zIndex: 10000,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                }}>
+                    <div className="glass-panel" style={{ width: '90%', maxWidth: '450px', padding: '30px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3 style={{ margin: 0, color: 'var(--text-highlight)' }}>Create New Group</h3>
+                            <X size={24} style={{ cursor: 'pointer' }} onClick={() => setShowCreateGroupModal(false)} />
+                        </div>
+
+                        <div>
+                            <label style={{ fontSize: '12px', color: '#888', display: 'block', marginBottom: '8px' }}>Group Name</label>
+                            <input 
+                                type="text" 
+                                className="glass-input" 
+                                placeholder="Enter group name..." 
+                                value={newGroupName}
+                                onChange={e => setNewGroupName(e.target.value)}
+                            />
+                        </div>
+
+                        <div>
+                            <label style={{ fontSize: '12px', color: '#888', display: 'block', marginBottom: '8px' }}>Select Members</label>
+                            <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {friends.map(friend => (
+                                    <div 
+                                        key={friend.userId}
+                                        onClick={() => {
+                                            if (selectedMembers.includes(friend.userId)) {
+                                                setSelectedMembers(selectedMembers.filter(id => id !== friend.userId));
+                                            } else {
+                                                setSelectedMembers([...selectedMembers, friend.userId]);
+                                            }
+                                        }}
+                                        style={{ 
+                                            display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', borderRadius: '8px', cursor: 'pointer',
+                                            background: selectedMembers.includes(friend.userId) ? 'rgba(0, 255, 136, 0.1)' : 'rgba(255,255,255,0.05)',
+                                            border: selectedMembers.includes(friend.userId) ? '1px solid rgba(0, 255, 136, 0.3)' : '1px solid transparent'
+                                        }}
+                                    >
+                                        <div style={{ width: '18px', height: '18px', borderRadius: '4px', border: '2px solid #45a29e', display: 'flex', alignItems: 'center', justifyContent: 'center', background: selectedMembers.includes(friend.userId) ? '#00ff88' : 'transparent' }}>
+                                            {selectedMembers.includes(friend.userId) && <Check size={14} color="#000" />}
+                                        </div>
+                                        <span style={{ fontSize: '14px' }}>{friend.username}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                            <button 
+                                onClick={() => setShowCreateGroupModal(false)} 
+                                className="glass-button" 
+                                style={{ flex: 1, color: '#ff6b6b' }}
+                            >
+                                Cancel
+                            </button>
+                            <button 
+                                onClick={async () => {
+                                    if (!newGroupName.trim() || selectedMembers.length === 0) {
+                                        alert("Please enter a group name and select at least one member.");
+                                        return;
+                                    }
+                                    setIsCreatingGroup(true);
+                                    try {
+                                        const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ name: newGroupName, memberIds: selectedMembers })
+                                        });
+                                        if (res.ok) {
+                                            fetchSocialData();
+                                            setShowCreateGroupModal(false);
+                                            setNewGroupName('');
+                                            setSelectedMembers([]);
+                                        }
+                                    } catch (e) {
+                                        console.error("Group creation failed", e);
+                                    }
+                                    setIsCreatingGroup(false);
+                                }} 
+                                className="glass-button" 
+                                style={{ flex: 1, background: 'var(--accent)', color: '#000' }}
+                                disabled={isCreatingGroup}
+                            >
+                                {isCreatingGroup ? <Loader className="spin" size={18} /> : "Create"}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

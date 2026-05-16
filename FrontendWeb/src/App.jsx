@@ -3,6 +3,10 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Login from './pages/Login';
 import Chat from './pages/Chat';
+import AdminRoutes from './pages/admin/AdminRoutes';
+import AdminLayout from './pages/admin/AdminLayout';
+import AdminDashboard from './pages/admin/AdminDashboard';
+import UserManagement from './pages/admin/UserManagement';
 import './App.css';
 
 const ProtectedRoute = ({ children }) => {
@@ -18,11 +22,20 @@ function App() {
       <Router>
         <Routes>
           <Route path="/" element={<Login />} />
+          <Route path="/login" element={<Navigate to="/" />} />
+          
           <Route path="/chat" element={
             <ProtectedRoute>
               <Chat />
             </ProtectedRoute>
           } />
+
+          {/* Admin Protected Namespace */}
+          <Route element={<AdminRoutes />}>
+            <Route path="/admin" element={<AdminLayout><AdminDashboard /></AdminLayout>} />
+            <Route path="/admin/users" element={<AdminLayout><UserManagement /></AdminLayout>} />
+            <Route path="/admin/settings" element={<AdminLayout><div className="text-slate-500">System settings module coming soon.</div></AdminLayout>} />
+          </Route>
         </Routes>
       </Router>
     </AuthProvider>
