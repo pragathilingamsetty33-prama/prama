@@ -1,21 +1,47 @@
-importScripts("https://www.gstatic.com/firebasejs/9.2.0/firebase-app-compat.js");
-importScripts("https://www.gstatic.com/firebasejs/9.2.0/firebase-messaging-compat.js");
+importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js');
 
-// Extract params injected during registration
-const urlParams = new URL(location.href).searchParams;
+// 📡 RUNTIME ENVIRONMENT EXTRACTION ENGINE (Hardened Version)
+// Extract credentials securely from the active window registration thread parameters
+console.log("[firebase-messaging-sw.js] Booting background worker thread...");
+
+const urlParams = new URLSearchParams(self.location.search);
 
 const firebaseConfig = {
-    apiKey: urlParams.get('apiKey'),
-    projectId: urlParams.get('projectId'),
-    appId: urlParams.get('appId'),
-    messagingSenderId: urlParams.get('senderId'),
-    authDomain: `${urlParams.get('projectId')}.firebaseapp.com`,
-    storageBucket: `${urlParams.get('projectId')}.firebasestorage.app`
+  apiKey: urlParams.get('apiKey'),
+  authDomain: urlParams.get('authDomain'),
+  projectId: urlParams.get('projectId'),
+  storageBucket: urlParams.get('storageBucket'),
+  messagingSenderId: urlParams.get('messagingSenderId'),
+  appId: urlParams.get('appId')
 };
 
-firebase.initializeApp(firebaseConfig);
-const messaging = firebase.messaging();
+// 📊 Integrity Tripwire: Ensure critical keys are present before initialization
+if (!firebaseConfig.projectId || !firebaseConfig.apiKey || !firebaseConfig.appId) {
+    console.error("❌ [firebase-messaging-sw.js] CRITICAL ERROR: Missing configuration parameters in query string!");
+    console.log("👉 Captured Config State:", JSON.stringify(firebaseConfig));
+} else {
+    console.log("✅ [firebase-messaging-sw.js] Configuration extracted successfully. Project:", firebaseConfig.projectId);
+}
 
-messaging.onBackgroundMessage((payload) => {
-});
+try {
+    // Instantiate context dynamically 
+    firebase.initializeApp(firebaseConfig);
+    const messaging = firebase.messaging();
 
+    // Background Push Receiver
+    messaging.onBackgroundMessage((payload) => {
+      console.log('[firebase-messaging-sw.js] Received background message ', payload);
+      
+      const notificationTitle = payload.notification ? payload.notification.title : "New Message";
+      const notificationOptions = {
+        body: payload.notification ? payload.notification.body : "You have received a secure message.",
+        icon: '/favicon.svg'
+      };
+
+      self.registration.showNotification(notificationTitle, notificationOptions);
+    });
+    console.log("🚀 [firebase-messaging-sw.js] Messaging engine armed and background listeners active.");
+} catch (err) {
+    console.error("❌ [firebase-messaging-sw.js] Background initialization failed:", err.message);
+}

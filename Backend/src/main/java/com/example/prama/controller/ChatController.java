@@ -16,14 +16,20 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.ResponseEntity;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-@Controller
+@RestController
 @RequiredArgsConstructor
 public class ChatController {
 
@@ -97,10 +103,56 @@ public class ChatController {
             }
         });
 
-        messagingTemplate.convertAndSend(
-                "/topic/messages." + chatMessage.getRecipientId().toString(),
+        messagingTemplate.convertAndSendToUser(
+                chatMessage.getRecipientId().toString(),
+                "/queue/messages",
                 chatMessage
         );
 
+    }
+
+    /**
+     * Mark all messages from a friend as read.
+     * High-Water Mark: Updates status to 'READ' and broadcasts receipt.
+     */
+    @PostMapping("/api/v1/messages/{friendId}/read")
+    public ResponseEntity<?> markAsRead(@PathVariable UUID friendId, org.springframework.security.core.Authentication authentication) {
+        if (authentication == null || !(authentication.getPrincipal() instanceof User currentUser)) {
+            return ResponseEntity.status(401).body("Unauthorized");
+        }
+
+        // 1. Update DB: Set all messages FROM the friend TO me as READ
+        messageRepository.markAsRead(friendId, currentUser.getId());
+
+        // 2. Broadcast RECEIPT_UPDATE to the friend
+        Map<String, Object> receiptPayload = new HashMap<>();
+        receiptPayload.put("type", "RECEIPT_UPDATE");
+        receiptPayload.put("readerId", currentUser.getId());
+        receiptPayload.put("lastReadAt", LocalDateTime.now().toString());
+
+        try {
+            // Route 1: Target via raw database Numeric ID string
+            messagingTemplate.convertAndSendToUser(friendId.toString(), "/queue/messages", receiptPayload);
+
+            // Fetch the friend account entity to extract Principal strings (Username/Email)
+            User friend = userRepository.findById(friendId).orElse(null);
+            if (friend != null) {
+                String usernameTarget = friend.getUsername();
+                String emailTarget = friend.getEmail();
+
+                if (usernameTarget != null) {
+                    messagingTemplate.convertAndSendToUser(usernameTarget, "/queue/messages", receiptPayload);
+                }
+
+                if (emailTarget != null) {
+                    messagingTemplate.convertAndSendToUser(emailTarget, "/queue/messages", receiptPayload);
+                }
+            }
+        } catch (Exception ex) {
+            System.err.println("❌ [BACKEND ROUTER CRASH] Broadcast mapping failed");
+            ex.printStackTrace();
+        }
+
+        return ResponseEntity.ok().build();
     }
 }

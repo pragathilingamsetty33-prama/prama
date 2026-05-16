@@ -7,6 +7,8 @@ import { Search, Send, ShieldCheck, LogOut, User as UserIcon, UserPlus, Check, U
 import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES } from '../utils/crypto';
 import { KeyCache } from '../utils/KeyCache';
 import forge from 'node-forge';
+import { messaging } from '../firebase';
+import { getToken } from "firebase/messaging";
 
 const openPramaDB = () => {
     return new Promise((resolve, reject) => {
@@ -249,6 +251,7 @@ const Chat = () => {
     const [isCreatingGroup, setIsCreatingGroup] = useState(false);
     const [groupRosterKeys, setGroupRosterKeys] = useState({}); // { groupId: [ { userId, publicKey }, ... ] }
     const [decryptedFiles, setDecryptedFiles] = useState({}); // { messageId: blobUrl }
+    const [liveTickTrigger, setLiveTickTrigger] = useState(0);
 
     // Keep activeFriendRef in sync
     useEffect(() => {
@@ -269,8 +272,18 @@ const Chat = () => {
             if (stompClient.current && stompClient.current.connected) {
                 if (groupSubscriptionRef.current) groupSubscriptionRef.current.unsubscribe();
                 groupSubscriptionRef.current = stompClient.current.subscribe(`/topic/group.${activeGroup.groupId}`, (msg) => {
-                    const receivedPayload = JSON.parse(msg.body);
-                    handleIncomingMessage(receivedPayload);
+                    const incomingPacket = JSON.parse(msg.body);
+                    
+                    // ROUTE 1: Handle actual chat messages (Decryption pipeline)
+                    if (incomingPacket.encryptedContent || incomingPacket.type === 'CHAT_MESSAGE') {
+                        handleIncomingMessage(incomingPacket);
+                        return; // STOP execution so it doesn't hit the receipt logic
+                    }
+                    
+                    // ROUTE 2: Handle Read Receipts
+                    if (incomingPacket.type === 'RECEIPT_UPDATE' || incomingPacket.isReceipt || incomingPacket.lastReadAt) {
+                        handleIncomingMessage(incomingPacket);
+                    }
                 });
             }
 
@@ -296,6 +309,45 @@ const Chat = () => {
         }
     };
 
+    const requestNotificationPermission = async () => {
+        try {
+            // 1. Structural check to ensure the messaging engine is alive
+            if (!messaging) {
+                console.warn("⚠️ [FIREBASE APP CHECK] Messaging engine is uninitialized or unsupported in this context.");
+                return;
+            }
+
+            const permission = await Notification.requestPermission();
+            if (permission === "granted") {
+                console.log("🔔 Notification permission granted.");
+                
+                // 2. Pass the validated messaging token container instance explicitly
+                const token = await getToken(messaging, {
+                    vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY
+                });
+                
+                if (token) {
+                    console.log("✅ FCM Registration Token secured successfully.");
+                    // Sync token with backend if authenticated
+                    if (user?.accessToken) {
+                        await fetch(`${import.meta.env.VITE_API_URL}/api/v1/users/fcm-token`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + user.accessToken
+                            },
+                            body: JSON.stringify({ fcmToken: token })
+                        });
+                    }
+                } else {
+                    console.warn("⚠️ No registration token available. Verify service worker registration pathing.");
+                }
+            }
+        } catch (err) {
+            console.error("❌ Asynchronous Firebase Installations / Token retrieval failed:", err.message);
+        }
+    };
+
     useEffect(() => {
         if (loading) return; // Wait for session restore to finish
         
@@ -305,6 +357,29 @@ const Chat = () => {
         }
         connectWebSocket();
         fetchSocialData();
+        requestNotificationPermission();
+
+        // DYNAMIC SERVICE WORKER REGISTRATION
+        if ('serviceWorker' in navigator) {
+            // Extract clean parameters straight from Vite's compiled environment configuration
+            const apiKey = encodeURIComponent(import.meta.env.VITE_FIREBASE_API_KEY || '');
+            const authDomain = encodeURIComponent(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '');
+            const projectId = encodeURIComponent(import.meta.env.VITE_FIREBASE_PROJECT_ID || '');
+            const storageBucket = encodeURIComponent(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '');
+            const messagingSenderId = encodeURIComponent(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '');
+            const appId = encodeURIComponent(import.meta.env.VITE_FIREBASE_APP_ID || '');
+
+            // Package variables straight into the registration initialization query birth-line
+            const swUrl = `/firebase-messaging-sw.js?apiKey=${apiKey}&authDomain=${authDomain}&projectId=${projectId}&storageBucket=${storageBucket}&messagingSenderId=${messagingSenderId}&appId=${appId}`;
+            
+            navigator.serviceWorker.register(swUrl)
+                .then((registration) => {
+                    console.log("✅ Service Worker registered with dynamic parameters.");
+                })
+                .catch((err) => {
+                    console.error('Service Worker registration failed:', err);
+                });
+        }
         
         // Poll for new requests/friends every 10 seconds
         const interval = setInterval(fetchSocialData, 10000);
@@ -505,6 +580,9 @@ const Chat = () => {
                         apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${chatId}/read`, { method: 'POST' });
                         // Also refresh the roster to get latest lastRead timestamps for others
                         fetchGroupRoster(chatId);
+                    } else if (activeFriend) {
+                        // NEW: Mark private messages as read via REST
+                        apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/messages/${chatId}/read`, { method: 'POST' });
                     }
                     
                     setUnreadCounts(prev => ({ ...prev, [chatId]: 0 }));
@@ -698,9 +776,67 @@ const Chat = () => {
 
         client.onConnect = () => {
             setStatus('Connected securely');
-            client.subscribe(`/topic/messages.${user.userId}`, (msg) => {
-                const receivedPayload = JSON.parse(msg.body);
-                handleIncomingMessage(receivedPayload);
+            client.subscribe('/user/queue/messages', (sdkMessage) => {
+                let incomingPacket;
+                try {
+                    incomingPacket = JSON.parse(sdkMessage.body);
+                } catch (parseErr) {
+                    console.error("❌ [DEEP TRACE - PARSE CRASH] STOMP body text is not valid structural JSON!", parseErr);
+                    return;
+                }
+                
+                // ROUTE 1: Secured Message Traffic
+                if (incomingPacket.encryptedContent || incomingPacket.type === 'CHAT_MESSAGE') {
+                    handleIncomingMessage(incomingPacket);
+                    return;
+                }
+                
+                // ROUTE 2: Structural Read Receipts
+                if (incomingPacket.type === 'RECEIPT_UPDATE' || incomingPacket.isReceipt || incomingPacket.lastReadAt) {
+                    const targetFriendId = incomingPacket.readerId || incomingPacket.userId || incomingPacket.senderId;
+                    
+                    setMessagesByFriend(prev => {
+                        const chatHistory = prev[targetFriendId] || [];
+                        const uniqueRenderTrigger = Math.random();
+                        return {
+                            ...prev,
+                            [targetFriendId]: chatHistory.map(msg => ({ ...msg, _liveTickPaintTrigger: uniqueRenderTrigger }))
+                        };
+                    });
+                    
+                    setFriends(prevFriends => {
+                        return prevFriends.map(f => {
+                            const matchId = f.id || f.userId || f.user_id;
+                            if (matchId === targetFriendId) {
+                                return { ...f, lastReadAt: incomingPacket.lastReadAt, last_read_at: incomingPacket.lastReadAt };
+                            }
+                            return f;
+                        });
+                    });
+                    
+                    const updateActiveRef = (prev) => {
+                        if (!prev) return prev;
+                        
+                        // 🔥 THE CORRECTION: Prioritize the account identity keys (userId) over row keys (id)
+                        const targetFriendId = incomingPacket.readerId || incomingPacket.userId || incomingPacket.senderId;
+                        const actualFriendUserId = prev.userId || prev.user_id || prev.id; 
+                        
+                        // Secure the match by checking both properties safely
+                        if (actualFriendUserId === targetFriendId || prev.userId === targetFriendId || prev.user_id === targetFriendId) {
+                            return { 
+                                ...prev, 
+                                lastReadAt: incomingPacket.lastReadAt, 
+                                last_read_at: incomingPacket.lastReadAt 
+                            };
+                        }
+                        return prev;
+                    };
+                    
+                    if (typeof setActiveFriend === 'function') setActiveFriend(updateActiveRef);
+                    if (typeof setSelectedUser === 'function') setSelectedUser(updateActiveRef);
+                    if (typeof setCurrentChatUser === 'function') setCurrentChatUser(updateActiveRef);
+                    return;
+                }
             });
         };
 
@@ -740,7 +876,7 @@ const Chat = () => {
         const messageId = payload.id || payload.messageId || payload.message_id;
 
         // 1. Handle TYPE_RECEIPT packets or live sync broadcasts
-        if ((messageId && payload.status) || payload.type === 'RECEIPT_UPDATE' || payload.lastReadAt || groupId) {
+        if ((messageId && payload.status) || payload.type === 'RECEIPT_UPDATE' || payload.lastReadAt || payload.readAt || payload.isReceipt || (groupId && !encryptedContent)) {
             
             // LOG: Live Packet Hit
 
@@ -763,10 +899,9 @@ const Chat = () => {
                     return { ...prev, [groupId]: updatedRoster };
                 });
 
-                // Update active group if currently viewed
+                // 1. Force update the Active Group Roster so the math recalculates
                 setActiveGroup(prevGroup => {
                     if (!prevGroup || (prevGroup.groupId !== groupId && prevGroup.id !== groupId)) return prevGroup;
-
                     const updatedMembers = (prevGroup.members || prevGroup.roster || []).map(member => {
                         const mId = member.userId || member.id || member.user_id;
                         if (mId === readerId) {
@@ -777,24 +912,46 @@ const Chat = () => {
                     return { ...prevGroup, members: updatedMembers };
                 });
 
-                // Force React to redraw the chat bubbles live so ticks light up
-                setMessagesByFriend(prev => {
-                    if (!prev[groupId]) return prev;
-                    return { ...prev, [groupId]: [...prev[groupId]] };
-                });
+ // 2. Force a deep mutation on the messages array to trigger the DOM repaint
+setMessagesByFriend(prev => {
+    const chatHistory = prev[groupId] || [];
+    
+    // FIX: Use a truly random decimal to guarantee a unique trigger instead of the clock
+    const uniqueRenderTrigger = Math.random(); 
+    
+    return { 
+        ...prev, 
+        [groupId]: chatHistory.map(msg => ({ 
+            ...msg, 
+            _liveTickPaintTrigger: uniqueRenderTrigger // The nuclear UI repaint flag
+        }))
+    };
+});
 
-                return; // Sever the global status update for group messages
-            }
-
-            // B. Private Receipts: Update the message status directly for 1-on-1 chats
+setLiveTickTrigger(prev => prev + 1);
+return; // Sever the global status update for group messages
+}
+            // B. Private Receipts: Nuclear Re-render
             const chatId = payload.recipientId === user.userId ? senderId : payload.recipientId;
             setMessagesByFriend(prev => {
                 const chatHistory = prev[chatId] || [];
-                const updatedHistory = chatHistory.map(msg => 
-                    msg.id === messageId ? { ...msg, status: payload.status } : msg
-                );
-                return { ...prev, [chatId]: updatedHistory };
+                const uniqueRenderTrigger = Math.random(); // Log-free bypass
+                
+                return {
+                    ...prev,
+                    [chatId]: chatHistory.map(msg => ({
+                        ...msg,
+                        _liveTickPaintTrigger: uniqueRenderTrigger
+                    }))
+                };
             });
+
+            // Update the active friend's read pointer state
+            setFriends(prevFriends => prevFriends.map(f => 
+                f.userId === chatId || f.id === chatId
+                ? { ...f, lastReadAt: payload.timestamp, last_read_at: payload.timestamp } 
+                : f
+            ));
             return;
         }
 
@@ -1313,9 +1470,10 @@ const Chat = () => {
                             if (sender) senderName = sender.username;
                         }
 
-                        // Calculate dynamic status for Group Messages
+                        // Calculate dynamic status
                         let displayStatus = msg.status;
                         if (isMe && activeGroup) {
+                            // ... group math logic ...
                             const roster = groupRosterKeys[activeGroup.groupId] || [];
                             const others = roster.filter(m => m.userId !== user.userId);
                             const msgTime = new Date(msg.createdAt || msg.timestamp || msg.rawTimestamp).getTime();
@@ -1328,12 +1486,14 @@ const Chat = () => {
                                 }
                                 
                                 const memberReadTime = new Date(readAtStr).getTime();
-                                const msgTime = new Date(msg.createdAt || msg.timestamp || msg.rawTimestamp).getTime();
-                                
+                                // FIX: Add Date.now() fallback to prevent NaN on live UI messages
+                                const msgTimeStr = msg.createdAt || msg.timestamp || msg.rawTimestamp;
+                                const msgTime = msgTimeStr ? new Date(msgTimeStr).getTime() : Date.now(); 
+
                                 const evaluation = memberReadTime >= msgTime;
-                                
                                 return evaluation;
                             });
+
 
                             // "DELIVERED" if at least one other member has a lastReadAt (implied delivery)
                             const someRead = others.some(m => {
@@ -1344,10 +1504,30 @@ const Chat = () => {
                             });
 
                             displayStatus = allRead ? 'READ' : (someRead ? 'DELIVERED' : 'SENT');
+                        } else if (isMe && activeFriend) {
+                            // RENDER THREAD
+                            const friendReadStr = activeFriend?.lastReadAt || activeFriend?.last_read_at;
+                            let friendReadTime = friendReadStr ? new Date(friendReadStr).getTime() : 0;
+                            if (isNaN(friendReadTime)) friendReadTime = 0;
+
+                            let msgTimeStr = msg.createdAt || msg.timestamp || msg.rawTimestamp;
+                            if (!msgTimeStr && msg.id && !isNaN(msg.id)) msgTimeStr = Number(msg.id);
+
+                            let msgTime = msgTimeStr ? new Date(msgTimeStr).getTime() : Date.now();
+                            if (isNaN(msgTime) && Array.isArray(msgTimeStr) && msgTimeStr.length >= 5) {
+                                msgTime = new Date(msgTimeStr[0], msgTimeStr[1] - 1, msgTimeStr[2], msgTimeStr[3], msgTimeStr[4], msgTimeStr[5] || 0).getTime();
+                            } else if (isNaN(msgTime)) {
+                                msgTime = Date.now();
+                            }
+
+                            const isRead = friendReadTime >= msgTime;
+                            
+                            displayStatus = isRead ? 'READ' : msg.status;
                         }
 
                         return (
                         <div key={msg.id} style={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: '70%' }}>
+                            {/* FORCE SYNC: {liveTickTrigger} */}
                             {!isMe && activeGroup && (
                                 <div style={{ fontSize: '12px', color: '#00ff88', marginBottom: '4px', marginLeft: '4px', fontWeight: 'bold' }}>
                                     {senderName}

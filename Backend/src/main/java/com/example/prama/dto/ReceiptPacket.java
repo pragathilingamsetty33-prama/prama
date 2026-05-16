@@ -18,4 +18,6 @@ public class ReceiptPacket {
     private UUID groupId;       // Null for private, non-null for group
     private String status;      // DELIVERED or READ
     private String timestamp;
+    @Builder.Default
+    private String type = "RECEIPT_UPDATE";
 }

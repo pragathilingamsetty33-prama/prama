@@ -34,4 +34,6 @@ public class ChatMessage {
     
     private String status;
     private String timestamp;
+    @Builder.Default
+    private String type = "CHAT_MESSAGE";
 }

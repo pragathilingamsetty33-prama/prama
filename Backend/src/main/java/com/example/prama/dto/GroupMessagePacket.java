@@ -32,4 +32,7 @@ public class GroupMessagePacket {
     // Map of Recipient UUID -> RSA-wrapped AES Key
     @JsonProperty("wrappedKeys")
     private Map<UUID, String> wrappedKeys;
+    
+    @Builder.Default
+    private String type = "CHAT_MESSAGE";
 }

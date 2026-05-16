@@ -38,8 +38,10 @@ public class ReceiptController {
 
             // Standardize payload for live sync
             receipt.setStatus("READ"); 
+            String destination = "/topic/group." + receipt.getGroupId();
+
             messagingTemplate.convertAndSend(
-                "/topic/group." + receipt.getGroupId(),
+                destination,
                 receipt
             );
 

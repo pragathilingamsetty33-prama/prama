@@ -16,4 +16,9 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
            "(m.sender = :u2 AND m.recipient = :u1) " +
            "ORDER BY m.timestamp ASC")
     List<Message> findConversation(@Param("u1") User u1, @Param("u2") User u2);
+    
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    @Query("UPDATE Message m SET m.status = 'READ' WHERE m.sender.id = :friendId AND m.recipient.id = :myId AND m.status <> 'READ'")
+    void markAsRead(@Param("friendId") UUID friendId, @Param("myId") UUID myId);
 }

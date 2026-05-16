@@ -9,7 +9,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
-
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -153,6 +153,8 @@ public class GroupController {
         return ResponseEntity.ok("Member removed");
     }
 
+    private final SimpMessagingTemplate messagingTemplate;
+
     /**
      * Mark a group chat as read for the current user.
      * High-Water Mark: Updates last_read_at in group_members.
@@ -160,9 +162,23 @@ public class GroupController {
     @PostMapping("/{groupId}/read")
     public ResponseEntity<?> markAsRead(@PathVariable UUID groupId) {
         User currentUser = (User) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        
         jdbcTemplate.update(
                 "UPDATE group_members SET last_read_at = CURRENT_TIMESTAMP WHERE group_id = ? AND user_id = ?",
                 groupId, currentUser.getId());
+
+        // BROADCAST to live sync topic
+        String destination = "/topic/group." + groupId;
+        com.example.prama.dto.ReceiptPacket packet = com.example.prama.dto.ReceiptPacket.builder()
+                .groupId(groupId)
+                .recipientId(currentUser.getId()) // The person who read it
+                .status("READ")
+                .timestamp(java.time.Instant.now().toString())
+                .type("RECEIPT_UPDATE")
+                .build();
+
+        messagingTemplate.convertAndSend(destination, packet);
+
         return ResponseEntity.ok("Group marked as read");
     }
 
