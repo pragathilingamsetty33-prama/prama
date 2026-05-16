@@ -211,7 +211,7 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
 };
 
 const Chat = () => {
-    const { user, keys, logout, apiFetch, loading } = useAuth();
+    const { user, setUser: setCurrentUser, keys, logout, apiFetch, loading } = useAuth();
     const navigate = useNavigate();
     const stompClient = useRef(null);
     const keysRef = useRef(keys);
@@ -254,6 +254,10 @@ const Chat = () => {
     const [aliasInput, setAliasInput] = useState("");
     const [showContactDetails, setShowContactDetails] = useState(false);
     const [isEditingAlias, setIsEditingAlias] = useState(false);
+    const [showProfileSettings, setShowProfileSettings] = useState(false);
+    const [profileFormData, setProfileFormData] = useState({ username: '', email: '', currentPassword: '', newPassword: '' });
+    const profileAvatarInputRef = useRef(null);
+
 
 
     const [showForwardModal, setShowForwardModal] = useState(false);
@@ -1750,15 +1754,35 @@ return; // Sever the global status update for group messages
                     <h2 style={{ margin: 0, color: 'var(--text-highlight)' }}>Prama E2EE</h2>
                 </div>
 
-                <div style={{ marginBottom: '20px', padding: '15px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '15px' }}>
-                    <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: 'var(--accent)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '18px' }}>
-                        {user?.username?.charAt(0).toUpperCase() || user?.email?.charAt(0).toUpperCase()}
+                <div style={{ marginBottom: '20px', padding: '15px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '15px', position: 'relative' }}>
+                    {/* 📊 PHASE 8: DYNAMIC SIDEBAR SELF-AVATAR BADGE */}
+                    <div className="w-10 h-10 rounded-full bg-emerald-800 flex items-center justify-center overflow-hidden flex-shrink-0 font-bold border border-emerald-600/50 shadow-md" style={{ width: '40px', height: '40px' }}>
+                        {user?.avatar ? (
+                            <img src={user.avatar} alt="My Profile" className="w-full h-full object-cover" />
+                        ) : (
+                            <span className="text-white" style={{ fontSize: '18px' }}>{user?.username?.charAt(0).toUpperCase()}</span>
+                        )}
                     </div>
                     <div>
                         <div style={{ fontSize: '12px', color: '#888' }}>Logged in as</div>
                         <div style={{ wordBreak: 'break-all', fontSize: '14px', fontWeight: 'bold' }}>{user?.username || user?.email}</div>
                     </div>
+
+                    {/* 📊 PROFILE SETTINGS GEAR ICON UTILITY */}
+                    <button 
+                        onClick={() => {
+                            setProfileFormData({ username: user?.username || '', email: user?.email || '', currentPassword: '', newPassword: '' });
+                            setShowProfileSettings(true);
+                        }}
+                        className="absolute top-3 right-3 text-gray-500 hover:text-emerald-400 transition-colors p-1 rounded hover:bg-gray-800/40"
+                        title="Account Settings"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+                    >
+                        {/* Dependency-Free Settings Gear SVG */}
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    </button>
                 </div>
+
 
                 {/* Tabs */}
                 <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
@@ -1945,31 +1969,51 @@ return; // Sever the global status update for group messages
             {/* Chat Area */}
             <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 <div 
-                    onClick={() => {
-                        if (activeGroup) {
-                            setShowGroupDetails(!showGroupDetails);
-                        } else if (activeFriend) {
-                            setShowContactDetails(!showContactDetails);
-                        }
-                    }}
-                    style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)', cursor: (activeGroup || activeFriend) ? 'pointer' : 'default' }}
+                    style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)' }}
                 >
-                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', fontWeight: 'bold', fontSize: '18px', color: '#00ff88' }}>
-                        {activeFriend || activeGroup ? (
-                            <>
-                                <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px', overflow: 'hidden' }}>
-                                    {(activeFriend?.avatar || activeGroup?.groupAvatar) ? (
-                                        <img src={activeFriend?.avatar || activeGroup?.groupAvatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                    ) : (
-                                        (activeFriend?.username || activeGroup?.name)?.charAt(0).toUpperCase()
-                                    )}
-                                </div>
-                                {activeFriend?.alias || activeFriend?.username || activeGroup?.name}
-                                {activeGroup && <span style={{ fontSize: '10px', color: '#66fcf1', opacity: 0.7 }}>(Click for Info)</span>}
-                            </>
-                        ) : 'Select a chat to start messaging'}
-                    </h3>
+                    {activeGroup ? (
+                        <div 
+                            onClick={() => setShowGroupDetails(!showGroupDetails)}
+                            className="flex items-center gap-2 cursor-pointer hover:opacity-90 transition-opacity select-none py-1"
+                        >
+                            <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px', overflow: 'hidden' }}>
+                                {activeGroup.groupAvatar ? (
+                                    <img src={activeGroup.groupAvatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                ) : (
+                                    activeGroup.name?.charAt(0).toUpperCase()
+                                )}
+                            </div>
+                            <h3 className="font-bold text-lg text-[#00ff88] m-0 flex items-center gap-2">
+                                {activeGroup.name}
+                                <span style={{ fontSize: '10px', color: '#66fcf1', opacity: 0.7, fontWeight: 'normal', fontStyle: 'italic' }}>(Click for Info)</span>
+                            </h3>
+                        </div>
+                    ) : activeFriend ? (
+                        <div 
+                            onClick={() => {
+                                setAliasInput(activeFriend.alias || "");
+                                setShowContactDetails(true);
+                                setShowGroupDetails(false);
+                            }}
+                            className="flex items-center gap-2 cursor-pointer hover:opacity-90 transition-opacity select-none py-1"
+                        >
+                            <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px', overflow: 'hidden' }}>
+                                {activeFriend.avatar ? (
+                                    <img src={activeFriend.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                ) : (
+                                    (activeFriend.alias || activeFriend.username || "U")?.charAt(0).toUpperCase()
+                                )}
+                            </div>
+                            <h3 className="font-bold text-lg text-[#00ff88] m-0 flex items-center gap-2">
+                                {activeFriend.alias || activeFriend.username}
+                                <span style={{ fontSize: '10px', color: '#66fcf1', opacity: 0.7, fontWeight: 'normal', fontStyle: 'italic' }}>(Click for Info)</span>
+                            </h3>
+                        </div>
+                    ) : (
+                        <h3 style={{ margin: 0, fontWeight: 'bold', fontSize: '18px', color: '#00ff88' }}>Select a chat to start messaging</h3>
+                    )}
                 </div>
+
                 <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
                     <div style={{ flex: 1, padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                     {(messagesByFriend[activeGroup?.groupId || activeFriend?.userId] || []).map(msg => {
@@ -2669,7 +2713,51 @@ return; // Sever the global status update for group messages
                                 <div className="w-20 h-20 rounded-full bg-gray-800 border-2 border-gray-700 overflow-hidden flex items-center justify-center shadow-lg mt-2 mb-3">
                                     {activeFriend.avatar ? <img src={activeFriend.avatar} alt="Profile" className="w-full h-full object-cover" /> : <span className="text-gray-400 font-bold text-2xl">U</span>}
                                 </div>
-                                <h3 className="font-bold text-lg text-white">{activeFriend.alias || activeFriend.username}</h3>
+                                {/* 📊 LOCAL ALIAS INLINE EDITOR ROW */}
+                                {isEditingAlias ? (
+                                    <div className="flex w-full items-center gap-2 px-2 mt-1">
+                                        <input 
+                                            autoFocus
+                                            type="text" 
+                                            value={aliasInput} 
+                                            onChange={e => setAliasInput(e.target.value)}
+                                            className="flex-1 bg-gray-950 border border-emerald-500/50 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-400"
+                                            placeholder="Assign personal nickname..."
+                                        />
+                                        <button 
+                                            onClick={async () => {
+                                                try {
+                                                    await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends/${activeFriend.userId}/alias`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ alias: aliasInput })
+                                                    });
+                                                    setFriends(prev => prev.map(f => String(f.userId) === String(activeFriend.userId) ? { ...f, alias: aliasInput } : f));
+                                                    setActiveFriend(prev => ({ ...prev, alias: aliasInput }));
+                                                    setIsEditingAlias(false);
+                                                } catch(err) { alert("Failed to save nickname."); }
+                                            }} 
+                                            className="text-emerald-400 hover:text-emerald-300"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                        </button>
+                                        <button onClick={() => setIsEditingAlias(false)} className="text-red-400 hover:text-red-300">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2 mt-1 justify-center w-full">
+                                        <h3 className="font-bold text-lg text-white">{activeFriend.alias || activeFriend.username}</h3>
+                                        <button 
+                                            onClick={() => { setAliasInput(activeFriend.alias || ""); setIsEditingAlias(true); }} 
+                                            className="text-gray-500 hover:text-emerald-400 transition-colors"
+                                            title="Edit Nickname"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                                        </button>
+                                    </div>
+                                )}
+
                             </div>
                             
                             <div className="flex-1 flex flex-col gap-4">
@@ -3124,7 +3212,100 @@ return; // Sever the global status update for group messages
                     </div>
                 </div>
             )}
+            {/* 📊 GLOBAL SELF IDENTITY & SETTINGS MODAL */}
+            {showProfileSettings && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }} className="animate-fade-in">
+                    <div style={{ background: '#0a0a0a', border: '1px solid rgba(255,255,255,0.1)', width: '360px', borderRadius: '12px', padding: '24px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)', display: 'flex', flexDirection: 'column', gap: '16px', maxHeight: '90vh', overflowY: 'auto' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.1)', pb: '8px' }}>
+                            <h4 style={{ color: '#00ff88', fontWeight: 'bold', textTransform: 'uppercase', fontSize: '12px', letterSpacing: '1px' }}>Account Customization</h4>
+                            <button onClick={() => setShowProfileSettings(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '14px' }}>✕</button>
+                        </div>
+
+                        {/* Avatar File Manager Section */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', paddingBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                            <input type="file" accept="image/*" ref={profileAvatarInputRef} style={{ display: 'none' }} onChange={(e) => {
+                                // 📊 IDENTITY PROFILE IMAGE CACHE SYNCHRONIZATION
+                                const file = e.target.files[0];
+                                if (!file) return;
+                                const r = new FileReader();
+                                r.onloadend = async () => {
+                                    try {
+                                        await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/users/profile`, {
+                                            method: 'PUT',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ avatar: r.result })
+                                        });
+                                        
+                                        // State propagation
+                                        if (typeof setCurrentUser === 'function') {
+                                            setCurrentUser(prev => ({ ...prev, avatar: r.result }));
+                                        }
+                                        
+                                        // Update browser identity cache to secure state across context reloads
+                                        const cachedUser = localStorage.getItem('prama_auth_user');
+                                        if (cachedUser) {
+                                            const parsedUser = JSON.parse(cachedUser);
+                                            parsedUser.avatar = r.result;
+                                            localStorage.setItem('prama_auth_user', JSON.stringify(parsedUser));
+                                        }
+                                        
+                                        alert("Identity profile picture synchronized.");
+                                    } catch(err) { 
+                                        alert("Failed to patch photo asset."); 
+                                    }
+                                };
+                                r.readAsDataURL(file);
+                            }} />
+
+                            <div style={{ position: 'relative', cursor: 'pointer' }} className="group" onClick={() => profileAvatarInputRef.current.click()}>
+                                <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: '#1a1a1a', border: '1px solid #333', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                                    {user?.avatar ? <img src={user.avatar} alt="Me" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: '20px', color: '#888', fontWeight: 'bold' }}>{user?.username?.charAt(0).toUpperCase()}</span>}
+                                </div>
+                                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0, transition: 'opacity 0.2s', fontSize: '10px', color: '#fff', fontWeight: 'bold' }} onMouseEnter={e => e.target.style.opacity = 1} onMouseLeave={e => e.target.style.opacity = 0}>Change</div>
+                            </div>
+                        </div>
+
+                        {/* Identity Metadata Form */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                            <label style={{ fontSize: '10px', textTransform: 'uppercase', trackingWider: '1px', color: '#555', fontWeight: 'bold' }}>Global Profile Information</label>
+                            <input type="text" placeholder="Username" value={profileFormData.username} onChange={e => setProfileFormData(p => ({...p, username: e.target.value}))} style={{ width: '100%', background: '#050505', border: '1px solid #222', borderRadius: '4px', padding: '8px', fontSize: '12px', color: '#fff', outline: 'none' }} onFocus={e => e.target.style.borderColor = '#00ff88'} onBlur={e => e.target.style.borderColor = '#222'}/>
+                            <input type="email" placeholder="Email Address" value={profileFormData.email} onChange={e => setProfileFormData(p => ({...p, email: e.target.value}))} style={{ width: '100%', background: '#050505', border: '1px solid #222', borderRadius: '4px', padding: '8px', fontSize: '12px', color: '#fff', outline: 'none' }} onFocus={e => e.target.style.borderColor = '#00ff88'} onBlur={e => e.target.style.borderColor = '#222'}/>
+                            <button onClick={async () => {
+                                try {
+                                    await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/users/profile`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ username: profileFormData.username, email: profileFormData.email })
+                                    });
+                                    setCurrentUser(prev => ({ ...prev, username: profileFormData.username, email: profileFormData.email }));
+                                    alert("System credentials updated successfully.");
+                                } catch(err) { alert("Update processing rejected."); }
+                            }} style={{ width: '100%', background: '#00ff88', color: '#000', fontWeight: 'bold', py: '6px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer', border: 'none' }}>Update Core Metadata</button>
+                        </div>
+
+                        {/* Authentication Security Form */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
+                            <label style={{ fontSize: '10px', textTransform: 'uppercase', trackingWider: '1px', color: '#555', fontWeight: 'bold' }}>Rotate Security Credentials</label>
+                            <input type="password" placeholder="Current Secure Password" value={profileFormData.currentPassword} onChange={e => setProfileFormData(p => ({...p, currentPassword: e.target.value}))} style={{ width: '100%', background: '#050505', border: '1px solid #222', borderRadius: '4px', padding: '8px', fontSize: '12px', color: '#fff', outline: 'none' }} onFocus={e => e.target.style.borderColor = '#440000'} onBlur={e => e.target.style.borderColor = '#222'}/>
+                            <input type="password" placeholder="New Secure Password" value={profileFormData.newPassword} onChange={e => setProfileFormData(p => ({...p, newPassword: e.target.value}))} style={{ width: '100%', background: '#050505', border: '1px solid #222', borderRadius: '4px', padding: '8px', fontSize: '12px', color: '#fff', outline: 'none' }} onFocus={e => e.target.style.borderColor = '#00ff88'} onBlur={e => e.target.style.borderColor = '#222'}/>
+                            <button onClick={async () => {
+                                if(!profileFormData.currentPassword || !profileFormData.newPassword) return alert("All authorization password blocks required.");
+                                try {
+                                    await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/users/password`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ currentPassword: profileFormData.currentPassword, newPassword: profileFormData.newPassword })
+                                    });
+                                    alert("Password matrix rotated securely via BCrypt.");
+                                    setProfileFormData(p => ({...p, currentPassword: '', newPassword: ''}));
+                                } catch(err) { alert("Authentication validation failed."); }
+                            }} style={{ width: '100%', background: 'rgba(255,0,0,0.1)', color: '#ff4444', fontWeight: 'bold', py: '6px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer', border: '1px solid rgba(255,0,0,0.2)' }}>Rotate Access Password</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
+
     );
 };
 
