@@ -37,6 +37,7 @@ public class ChatController {
     private final UserRepository userRepository;
     private final MessageRepository messageRepository;
     private final com.example.prama.repository.GroupMessageRepository groupMessageRepository;
+    private final com.example.prama.repository.FriendshipRepository friendshipRepository;
     private final NotificationService notificationService;
 
     // ============================================================================
@@ -241,6 +242,13 @@ public class ChatController {
         chatMessage.setTimestamp(Instant.now().toString());
 
         userRepository.findById(chatMessage.getRecipientId()).ifPresent(recipient -> {
+            // 🔥 GHOST PROTOCOL SILENT-DROP GATEWAY
+            java.util.Optional<com.example.prama.entity.Friendship> activeLink = friendshipRepository.findByUserIds(sender.getId(), recipient.getId());
+            if (activeLink.isEmpty()) {
+                System.out.println("🤫 [GHOST] Intercepted and dropped message from " + sender.getUsername() + " to " + recipient.getUsername());
+                return; 
+            }
+
             Message message = Message.builder()
                     .sender(sender)
                     .recipient(recipient)

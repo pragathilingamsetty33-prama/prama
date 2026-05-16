@@ -16,4 +16,6 @@ public class FriendDTO {
     private UUID userId; // The friend's User ID
     private String username;
     private String email;
+    private String alias;
+    private String avatar;
 }

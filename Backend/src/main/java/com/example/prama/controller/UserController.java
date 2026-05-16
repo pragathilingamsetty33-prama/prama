@@ -1,13 +1,24 @@
 package com.example.prama.controller;
 
 import com.example.prama.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
+
+import com.example.prama.entity.User;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.http.HttpStatus;
+import java.security.Principal;
+import java.util.List;
 
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -16,6 +27,7 @@ import java.util.UUID;
 public class UserController {
 
     private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
 
     @GetMapping("/{id}/public-key")
     public ResponseEntity<String> getUserPublicKey(@PathVariable UUID id) {
@@ -104,5 +116,37 @@ public class UserController {
             }
         }
         return ResponseEntity.badRequest().build();
+    }
+
+    @PutMapping("/profile")
+    @Transactional
+    public ResponseEntity<?> updatePersonalProfile(@RequestBody Map<String, String> payload, Principal principal) {
+        User user = userRepository.findByUsername(principal.getName())
+            .orElseGet(() -> userRepository.findByEmail(principal.getName()).orElse(null));
+            
+        if (user == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).body("User context lost.");
+
+        if (payload.containsKey("username") && !payload.get("username").trim().isEmpty()) user.setUsername(payload.get("username").trim());
+        if (payload.containsKey("email") && !payload.get("email").trim().isEmpty()) user.setEmail(payload.get("email").trim());
+        if (payload.containsKey("avatar")) user.setAvatar(payload.get("avatar")); 
+        
+        userRepository.save(user);
+        return ResponseEntity.ok(Map.of("success", true, "message", "Profile updated globally."));
+    }
+
+    @PutMapping("/password")
+    @Transactional
+    public ResponseEntity<?> updatePassword(@RequestBody Map<String, String> payload, Principal principal) {
+        User user = userRepository.findByUsername(principal.getName())
+            .orElseGet(() -> userRepository.findByEmail(principal.getName()).orElse(null));
+            
+        if (user == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).body("User not found.");
+
+        if (!passwordEncoder.matches(payload.get("currentPassword"), user.getPassword())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Current password validation failed.");
+        }
+        user.setPassword(passwordEncoder.encode(payload.get("newPassword")));
+        userRepository.save(user);
+        return ResponseEntity.ok(Map.of("success", true, "message", "Password rotated securely."));
     }
 }

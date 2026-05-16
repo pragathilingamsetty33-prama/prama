@@ -36,6 +36,12 @@ public class Friendship {
     @Column(nullable = false)
     private Status status;
 
+    @Column
+    private String senderAlias;
+
+    @Column
+    private String receiverAlias;
+
     @CreationTimestamp
     private LocalDateTime createdAt;
 }

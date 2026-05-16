@@ -198,6 +198,152 @@ public class GroupChatController {
         return ResponseEntity.ok().body(Map.of("success", true, "evictedUserId", kickedUserId));
     }
 
+    // ============================================================================
+    // VOLUNTARY EXIT & AUTOMATED DISSOLUTION ENDPOINT (PHASE 6)
+    // ============================================================================
+    @PostMapping("/api/v1/groups/{groupId}/exit")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> exitGroupAndRotateKeys(
+            @PathVariable String groupId, 
+            @RequestBody(required = false) Map<String, Object> payload, 
+            Principal principal) {
+            
+        User currentUser = (User) ((UsernamePasswordAuthenticationToken) principal).getPrincipal();
+        UUID userId = currentUser.getId();
+        
+        // 1. Remove the member from the roster
+        int removed = jdbcTemplate.update(
+            "DELETE FROM group_members WHERE group_id = ?::uuid AND user_id = ?::uuid",
+            groupId, userId
+        );
+        
+        if (removed == 0) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("You are not a member of this group.");
+        }
+        
+        // 2. Count remaining admins
+        Integer remainingAdmins = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM group_members WHERE group_id = ?::uuid AND is_admin = true",
+            Integer.class, groupId
+        );
+        
+        if (remainingAdmins == null || remainingAdmins == 0) {
+            // 3. Dissolve the group if no admins remain
+            jdbcTemplate.update("DELETE FROM group_message_keys WHERE message_id IN (SELECT id FROM group_messages WHERE group_id = ?::uuid)", groupId);
+            jdbcTemplate.update("DELETE FROM group_messages WHERE group_id = ?::uuid", groupId);
+            jdbcTemplate.update("DELETE FROM group_members WHERE group_id = ?::uuid", groupId);
+            jdbcTemplate.update("DELETE FROM groups WHERE group_id = ?::uuid", groupId);
+            
+            Map<String, Object> dissolvePacket = new HashMap<>();
+            dissolvePacket.put("type", "GROUP_DISSOLVED");
+            dissolvePacket.put("groupId", groupId);
+            messagingTemplate.convertAndSend("/topic/group." + groupId, dissolvePacket);
+            
+            return ResponseEntity.ok().body(Map.of("success", true, "action", "DISSOLVED"));
+        }
+        
+        // 4. If group survives, process the N-Wrap key rotation payload
+        if (payload != null && payload.containsKey("newEncryptedKeys")) {
+            Map<String, String> rotatedKeysMap = (Map<String, String>) payload.get("newEncryptedKeys");
+            rotatedKeysMap.forEach((uid, newWrappedKey) -> {
+                jdbcTemplate.update(
+                    "UPDATE group_members SET encrypted_group_key = ? WHERE group_id = ?::uuid AND user_id = ?::uuid",
+                    newWrappedKey, groupId, uid
+                );
+            });
+            
+            Map<String, Object> exitPacket = new HashMap<>();
+            exitPacket.put("type", "MEMBER_EXITED");
+            exitPacket.put("groupId", groupId);
+            exitPacket.put("exitedUserId", userId.toString());
+            exitPacket.put("rotatedKeys", rotatedKeysMap);
+            
+            messagingTemplate.convertAndSend("/topic/group." + groupId, exitPacket);
+        }
+        
+        return ResponseEntity.ok().body(Map.of("success", true, "action", "EXITED"));
+    }
+
+    // ============================================================================
+    // BULLETPROOF METADATA UPDATE ENDPOINT (WITH EXPLICIT LOGGING)
+    // ============================================================================
+    public static class GroupUpdatePayload {
+        private String name;
+        private String avatar;
+        
+        // Jackson REQUIRES an empty constructor and explicit Getters/Setters
+        public GroupUpdatePayload() {} 
+        
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+        public String getAvatar() { return avatar; }
+        public void setAvatar(String avatar) { this.avatar = avatar; }
+    }
+
+    @PutMapping("/api/v1/groups/{groupId}/update")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> updateGroupMetadata(
+            @PathVariable String groupId, 
+            @RequestBody(required = false) GroupUpdatePayload payload, 
+            Principal principal) {
+            
+        System.out.println("🦅 [DEVOPS HTTP 200] Request successfully penetrated the controller for Group: " + groupId);
+        
+        if (payload == null) {
+            System.err.println("❌ [DEVOPS ERROR] Payload is completely null!");
+            return ResponseEntity.badRequest().body("Empty payload.");
+        }
+        
+        System.out.println("📦 Payload Parsed -> New Name: [" + payload.getName() + "], Avatar Attached: [" + (payload.getAvatar() != null) + "]");
+        
+        String callerIdentity = principal.getName();
+        
+        // 1. Security Gate: Verify the executing user is already a certified admin
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM group_members gm JOIN prama_users u ON gm.user_id = u.id " +
+            "WHERE gm.group_id = ?::uuid AND (u.username = ? OR u.email = ?) AND gm.is_admin = true",
+            Integer.class, groupId, callerIdentity, callerIdentity
+        );
+            
+        if (count == null || count == 0) {
+            System.err.println("❌ [SECURITY] Unauthorized modification attempt by: " + callerIdentity);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized: Administrative authorization required to alter group metadata.");
+        }
+        
+        // 2. Mutate the group record metadata
+        if (payload.getName() != null && !payload.getName().trim().isEmpty()) {
+            jdbcTemplate.update("UPDATE groups SET name = ? WHERE group_id = ?::uuid", payload.getName().trim(), groupId);
+            System.out.println("✅ Group name updated in memory.");
+        }
+        
+        if (payload.getAvatar() != null) {
+            // Attempt to add column if it doesn't exist
+            try {
+                jdbcTemplate.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS group_avatar TEXT");
+            } catch (Exception e) { /* Column might already exist */ }
+            
+            jdbcTemplate.update("UPDATE groups SET group_avatar = ? WHERE group_id = ?::uuid", payload.getAvatar(), groupId);
+            System.out.println("✅ Group avatar updated in memory.");
+        }
+        
+        // 3. Fetch final state for broadcast
+        Map<String, Object> groupData = jdbcTemplate.queryForMap("SELECT name FROM groups WHERE group_id = ?::uuid", groupId);
+        
+        // 4. Real-Time Sync Broadcast
+        System.out.println("🏆 Database committed. Broadcasting lightweight STOMP sync packet...");
+        Map<String, Object> updatePacket = new HashMap<>();
+        updatePacket.put("type", "GROUP_UPDATED");
+        updatePacket.put("groupId", groupId);
+        updatePacket.put("newName", groupData.get("name"));
+        // 🔥 WEBSOCKET PROTECTION: Do not send the massive Base64 string over STOMP. 
+        // Other users will load the new image natively on their next app refresh.
+        updatePacket.put("avatarUpdated", payload.getAvatar() != null);
+        
+        messagingTemplate.convertAndSend("/topic/group." + groupId, updatePacket);
+        
+        return ResponseEntity.ok().body(Map.of("success", true, "message", "Group metadata updated flawlessly."));
+    }
+
     /**
      * Handles incoming GroupMessagePackets and fanned-out delivery.
      * ZERO-KNOWLEDGE: The server only sees individual wrapped keys and routes them.

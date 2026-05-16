@@ -249,6 +249,13 @@ const Chat = () => {
     const [toast, setToast] = useState(null); // { senderName, content, visible }
     const toastTimeoutRef = useRef(null);
 
+    // 📊 PHASE 8: PERSONAL IDENTITY & ALIAS STATES
+    const [showAliasModal, setShowAliasModal] = useState(null); 
+    const [aliasInput, setAliasInput] = useState("");
+    const [showContactDetails, setShowContactDetails] = useState(false);
+    const [isEditingAlias, setIsEditingAlias] = useState(false);
+
+
     const [showForwardModal, setShowForwardModal] = useState(false);
     const [forwardingAttachment, setForwardingAttachment] = useState(null);
     const groupSubscriptionRef = useRef(null);
@@ -270,6 +277,14 @@ const Chat = () => {
     const [showAddMemberModal, setShowAddMemberModal] = useState(false);
     const [selectedFriendToAdd, setSelectedFriendToAdd] = useState(null);
     const [showRemoveMemberModal, setShowRemoveMemberModal] = useState(false);
+
+    // 📊 PHASE 7: GROUP CUSTOMIZATION STATE PRIMITIVES
+    const [isEditingGroupName, setIsEditingGroupName] = useState(false);
+    const [editGroupNameInput, setEditGroupNameInput] = useState("");
+    const groupAvatarInputRef = useRef(null); // Reference for the hidden file input
+
+    // 📊 ROSTER UI LIMIT STATE (PATCH)
+    const [visibleRosterCount, setVisibleRosterCount] = useState(6);
 
     // Keep activeFriendRef in sync
     useEffect(() => {
@@ -366,6 +381,75 @@ const Chat = () => {
                         return;
                     }
 
+                    // 📊 WEBSOCKET LISTENER: AUTOMATIC DISSOLUTION (PHASE 6)
+                    if (incomingPacket.type === 'GROUP_DISSOLVED') {
+                        setGroups(prev => prev.filter(g => String(g.groupId) !== String(incomingPacket.groupId)));
+                        if (activeGroup && String(activeGroup.groupId) === String(incomingPacket.groupId)) {
+                            setActiveGroup(null);
+                            alert("The final administrator has exited. This group has been permanently dissolved.");
+                        }
+                        return;
+                    }
+
+                    // 📊 WEBSOCKET LISTENER: VOLUNTARY EXIT & KEY ROTATION (PHASE 6)
+                    if (incomingPacket.type === 'MEMBER_EXITED' && activeGroup && String(incomingPacket.groupId) === String(activeGroup.groupId)) {
+                        // Instantly remove them from the UI roster
+                        setActiveGroup(prev => {
+                            if (!prev) return prev;
+                            return {
+                                ...prev,
+                                members: (prev.members || []).filter(m => String(m.userId) !== String(incomingPacket.exitedUserId))
+                            };
+                        });
+                        
+                        // Re-key if a payload exists (same as eviction handling)
+                        const freshWrappedKeyMap = incomingPacket.rotatedKeys;
+                        const currentUserIdStr = String(user.userId);
+                        
+                        if (freshWrappedKeyMap && freshWrappedKeyMap[currentUserIdStr]) {
+                            const targetWrappedKeyB64 = freshWrappedKeyMap[currentUserIdStr];
+                            const decryptFn = typeof decryptAESKeyWithRSA === 'function' ? decryptAESKeyWithRSA : null;
+                                              
+                            if (decryptFn) {
+                                Promise.resolve(decryptFn(targetWrappedKeyB64, keys.privateKey))
+                                    .then(clearSymmetricKeyBytes => {
+                                        setActiveGroup(prev => {
+                                            if (!prev) return prev;
+                                            return { ...prev, decryptedKey: clearSymmetricKeyBytes };
+                                        });
+                                        fetchGroupRoster(activeGroup.groupId);
+                                    }).catch(err => console.error("Key rotation decryption failed:", err));
+                            }
+                        }
+                        return;
+                    }
+
+                    // 📊 WEBSOCKET LISTENER: GROUP METADATA SYNC (Name & Avatar) (PHASE 7)
+                    if (incomingPacket.type === 'GROUP_UPDATED') {
+                        const { groupId, newName, newAvatar } = incomingPacket;
+                        
+                        // Update active open panel view
+                        if (activeGroup && String(activeGroup.groupId) === String(groupId)) {
+                            setActiveGroup(prev => {
+                                if (!prev) return prev;
+                                return {
+                                    ...prev, 
+                                    name: newName || prev.name, 
+                                    groupAvatar: newAvatar !== undefined ? newAvatar : prev.groupAvatar
+                                };
+                            });
+                        }
+                        
+                        // Update background groups list navigation drawer
+                        setGroups(prev => prev.map(g => String(g.groupId) === String(groupId) ? {
+                            ...g, 
+                            name: newName || g.name, 
+                            groupAvatar: newAvatar !== undefined ? newAvatar : g.groupAvatar
+                        } : g));
+                        
+                        return;
+                    }
+
                     // ROUTE 1: Handle actual chat messages (Decryption pipeline)
                     if (incomingPacket.encryptedContent || incomingPacket.type === 'CHAT_MESSAGE') {
                         handleIncomingMessage(incomingPacket);
@@ -399,6 +483,54 @@ const Chat = () => {
         } catch (e) {
             console.error("Error fetching group roster:", e);
         }
+    };
+
+    // 📊 OMNICHANNEL MEDIA CAPTURE & DISPATCH ENGINE (PHASE 7)
+    const handleGroupMetadataUpdate = async (newName, base64Avatar) => {
+        try {
+            const payload = {};
+            if (newName) payload.name = newName;
+            if (base64Avatar !== undefined) payload.avatar = base64Avatar;
+            
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/update`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            if (res.ok) {
+                // 🔥 OPTIMISTIC UI UPDATE: Repaint instantly on 200 OK success
+                setActiveGroup(prev => ({
+                    ...prev,
+                    name: newName || prev.name,
+                    groupAvatar: base64Avatar !== undefined ? base64Avatar : prev.groupAvatar
+                }));
+
+                setGroups(prev => prev.map(g => String(g.groupId) === String(activeGroup.groupId) ? {
+                    ...g,
+                    name: newName || g.name,
+                    groupAvatar: base64Avatar !== undefined ? base64Avatar : g.groupAvatar
+                } : g));
+
+                setIsEditingGroupName(false);
+            }
+        } catch (err) {
+            console.error("❌ Group metadata update rejected by server:", err);
+            alert("Failed to update group. Ensure image size is within database text limits.");
+        }
+    };
+
+    const handleAvatarFileChange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        // Read file as Base64 String
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64String = reader.result;
+            handleGroupMetadataUpdate(null, base64String);
+        };
+        reader.readAsDataURL(file);
     };
 
     const requestNotificationPermission = async () => {
@@ -1713,16 +1845,34 @@ return; // Sever the global status update for group messages
                                         border: activeFriend?.id === friend.id ? '1px solid rgba(102, 252, 241, 0.3)' : '1px solid transparent'
                                     }}
                                 >
-                                    <div style={{ position: 'relative', width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-                                        {friend.username?.charAt(0).toUpperCase()}
+                                    <div style={{ position: 'relative', width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', overflow: 'hidden' }}>
+                                        {friend.avatar ? (
+                                            <img src={friend.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                        ) : (
+                                            friend.username?.charAt(0).toUpperCase()
+                                        )}
                                         {unreadCounts[friend.userId] > 0 && (
-                                            <div style={{ position: 'absolute', top: '-4px', right: '-4px', width: '20px', height: '20px', borderRadius: '50%', background: '#00ff88', color: '#000', fontSize: '11px', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 8px rgba(0,255,136,0.6)', animation: 'pulse 1.5s infinite' }}>
+                                            <div style={{ position: 'absolute', top: '-4px', right: '-4px', width: '20px', height: '20px', borderRadius: '50%', background: '#00ff88', color: '#000', fontSize: '11px', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 8px rgba(0,255,136,0.6)', animation: 'pulse 1.5s infinite', zIndex: 10 }}>
                                                 {unreadCounts[friend.userId]}
                                             </div>
                                         )}
                                     </div>
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ fontSize: '14px', color: unreadCounts[friend.userId] > 0 ? '#00ff88' : 'var(--text-highlight)', fontWeight: unreadCounts[friend.userId] > 0 ? 'bold' : 'normal' }}>{friend.username}</div>
+                                    <div style={{ flex: 1, overflow: 'hidden' }}>
+                                        {/* 📊 ALIAS-AWARE FRIENDS LIST */}
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }} className="group">
+                                            <div style={{ fontSize: '14px', color: unreadCounts[friend.userId] > 0 ? '#00ff88' : 'var(--text-highlight)', fontWeight: unreadCounts[friend.userId] > 0 ? 'bold' : 'normal', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {friend.alias || friend.username}
+                                            </div>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); setAliasInput(friend.alias || ""); setShowAliasModal(friend); }} 
+                                                style={{ opacity: 0, background: 'none', border: 'none', color: '#888', cursor: 'pointer', transition: 'all 0.2s', padding: '4px' }}
+                                                className="group-hover-visible hover-emerald"
+                                                title="Set Local Alias"
+                                            >
+                                                {/* Raw SVG bypasses lucide-react crashes */}
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                                            </button>
+                                        </div>
                                         <div style={{ fontSize: '11px', color: '#888' }}>{friend.email}</div>
                                     </div>
                                 </div>
@@ -1750,8 +1900,12 @@ return; // Sever the global status update for group messages
                                         border: activeGroup?.groupId === group.groupId ? '1px solid rgba(102, 252, 241, 0.3)' : '1px solid transparent'
                                     }}
                                 >
-                                    <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #00ff88, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-                                        {group.name?.charAt(0).toUpperCase()}
+                                    <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #00ff88, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', overflow: 'hidden' }}>
+                                        {group.groupAvatar || group.avatar ? (
+                                            <img src={group.groupAvatar || group.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                        ) : (
+                                            group.name?.charAt(0).toUpperCase()
+                                        )}
                                     </div>
                                     <div style={{ flex: 1 }}>
                                         <div style={{ fontSize: '14px', color: 'var(--text-highlight)' }}>{group.name}</div>
@@ -1794,17 +1948,23 @@ return; // Sever the global status update for group messages
                     onClick={() => {
                         if (activeGroup) {
                             setShowGroupDetails(!showGroupDetails);
+                        } else if (activeFriend) {
+                            setShowContactDetails(!showContactDetails);
                         }
                     }}
-                    style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)', cursor: activeGroup ? 'pointer' : 'default' }}
+                    style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)', cursor: (activeGroup || activeFriend) ? 'pointer' : 'default' }}
                 >
-                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', fontWeight: 'bold', fontSize: '18px', color: '#00ff88' }}>
                         {activeFriend || activeGroup ? (
                             <>
-                                <div style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px' }}>
-                                    {(activeFriend?.username || activeGroup?.name)?.charAt(0).toUpperCase()}
+                                <div style={{ width: '35px', height: '35px', borderRadius: '50%', background: 'linear-gradient(135deg, #66fcf1, #45a29e)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px', overflow: 'hidden' }}>
+                                    {(activeFriend?.avatar || activeGroup?.groupAvatar) ? (
+                                        <img src={activeFriend?.avatar || activeGroup?.groupAvatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                    ) : (
+                                        (activeFriend?.username || activeGroup?.name)?.charAt(0).toUpperCase()
+                                    )}
                                 </div>
-                                Secure Chat with {activeFriend?.username || activeGroup?.name}
+                                {activeFriend?.alias || activeFriend?.username || activeGroup?.name}
                                 {activeGroup && <span style={{ fontSize: '10px', color: '#66fcf1', opacity: 0.7 }}>(Click for Info)</span>}
                             </>
                         ) : 'Select a chat to start messaging'}
@@ -1973,27 +2133,121 @@ return; // Sever the global status update for group messages
                     )}
                     </div>
 
-                    {/* 📊 PHASE 3: DYNAMIC GROUP DETAILS INTERACTION DRAWER */}
+                    {/* 📊 PHASE 3: DYNAMIC GROUP DETAILS INTERACTION DRAWER (UPGRADED WITH MASTER SCROLLBAR) */}
                     {showGroupDetails && activeGroup && (
-                        <div className="glass-panel" style={{ width: '300px', borderLeft: '1px solid var(--border)', padding: '20px', display: 'flex', flexDirection: 'column', background: 'rgba(0,0,0,0.2)' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
-                                <h4 style={{ margin: 0, fontSize: '12px', color: '#66fcf1', textTransform: 'uppercase', letterSpacing: '1px' }}>Group Roster</h4>
-                                <button onClick={() => setShowGroupDetails(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '12px' }}>✕</button>
-                            </div>
-                            
-                            {/* Member Directory */}
-                            <div style={{ flex: 1, overflowY: 'auto', marginBottom: '20px' }}>
-                                {(groupRosterKeys[activeGroup.groupId] || []).map(member => (
-                                    <div key={member.userId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', borderRadius: '6px', padding: '8px 12px', marginBottom: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#00ff88' }}></div>
-                                            <span style={{ fontSize: '13px' }}>{member.username}</span>
+                        <div className="glass-panel scrollbar-custom" style={{ width: '300px', borderLeft: '1px solid var(--border)', padding: '20px', display: 'flex', flexDirection: 'column', background: 'rgba(0,0,0,0.2)', height: '100%', overflowY: 'auto' }}>
+                            {/* 📊 PHASE 7: DYNAMIC GROUP BRANDING HEADER */}
+                            {(() => {
+                                const roster = groupRosterKeys[activeGroup.groupId] || [];
+                                const me = roster.find(m => String(m.userId) === String(user.userId));
+                                const isCurrentUserAdmin = me?.isAdmin;
+                                
+                                return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '20px', paddingBottom: '15px', borderBottom: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
+                                        <button onClick={() => setShowGroupDetails(false)} style={{ position: 'absolute', top: '0', right: '0', background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '12px' }}>✕</button>
+                                        
+                                        {/* Hidden native input for Camera/Gallery */}
+                                        <input type="file" accept="image/*" ref={groupAvatarInputRef} onChange={handleAvatarFileChange} style={{ display: 'none' }} />
+                                        
+                                        {/* Group Avatar Frame */}
+                                        <div style={{ position: 'relative', marginTop: '10px', marginBottom: '15px' }} className="group-avatar-container">
+                                            <div style={{ width: '80px', height: '80px', borderRadius: '50%', background: 'rgba(255,255,255,0.05)', border: '2px solid rgba(255,255,255,0.1)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 15px rgba(0,0,0,0.3)' }}>
+                                                {activeGroup.groupAvatar ? (
+                                                    <img src={activeGroup.groupAvatar} alt="Group" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                                ) : (
+                                                    <span style={{ color: '#888', fontWeight: 'bold', fontSize: '24px' }}>{activeGroup.name?.charAt(0).toUpperCase()}</span>
+                                                )}
+                                            </div>
+                                            {/* Admin Avatar Edit Overlay */}
+                                            {isCurrentUserAdmin && (
+                                                <button 
+                                                    onClick={() => groupAvatarInputRef.current.click()}
+                                                    style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', borderRadius: '50%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', opacity: 0, transition: 'opacity 0.2s', border: 'none', color: '#fff', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
+                                                    onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                                                    onMouseLeave={(e) => e.currentTarget.style.opacity = 0}
+                                                >
+                                                    <Camera size={18} style={{ marginBottom: '4px' }} />
+                                                    Change
+                                                </button>
+                                            )}
                                         </div>
-                                        {member.isAdmin && (
-                                            <span style={{ fontSize: '9px', background: 'rgba(102, 252, 241, 0.1)', border: '1px solid rgba(102, 252, 241, 0.3)', color: '#66fcf1', padding: '2px 5px', borderRadius: '4px', fontWeight: 'bold' }}>ADMIN</span>
+                                        
+                                        {/* Group Name Editor */}
+                                        {isEditingGroupName && isCurrentUserAdmin ? (
+                                            <div style={{ display: 'flex', width: '100%', alignItems: 'center', gap: '8px', padding: '0 8px' }}>
+                                                <input 
+                                                    autoFocus
+                                                    type="text" 
+                                                    value={editGroupNameInput} 
+                                                    onChange={e => setEditGroupNameInput(e.target.value)}
+                                                    className="glass-input"
+                                                    style={{ flex: 1, padding: '4px 8px', fontSize: '13px' }}
+                                                    placeholder="New Group Name"
+                                                />
+                                                <button onClick={() => handleGroupMetadataUpdate(editGroupNameInput, undefined)} style={{ background: 'none', border: 'none', color: '#00ff88', cursor: 'pointer' }}><Check size={18} /></button>
+                                                <button onClick={() => setIsEditingGroupName(false)} style={{ background: 'none', border: 'none', color: '#ff6b6b', cursor: 'pointer' }}><X size={18} /></button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <h3 style={{ margin: 0, fontWeight: 'bold', fontSize: '18px', color: '#fff' }}>{activeGroup.name}</h3>
+                                                {isCurrentUserAdmin && (
+                                                    <button onClick={() => { setEditGroupNameInput(activeGroup.name); setIsEditingGroupName(true); }} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }} className="hover-emerald">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                                                    </button>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
-                                ))}
+                                );
+                            })()}
+                            
+                            {/* 📊 SCROLLABLE & SORTED ROSTER DIRECTORY (PATCH) */}
+                            <div style={{ marginBottom: '16px', display: 'flex', flexDirection: 'column' }}>
+                                <p style={{ fontSize: '11px', color: '#888', marginBottom: '8px', fontWeight: 'bold', textTransform: 'uppercase' }}>
+                                    Roster Directory ({(groupRosterKeys[activeGroup.groupId] || []).length})
+                                </p>
+                                
+                                {/* Scrollable Container with max-height to protect Admin Tools */}
+                                <div style={{ overflowY: 'auto', maxHeight: '250px', paddingRight: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }} className="scrollbar-custom">
+                                    {(groupRosterKeys[activeGroup.groupId] || [])
+                                        .sort((a, b) => {
+                                            // Sort Order: You -> Admins -> Members
+                                            const isMeA = String(a.userId) === String(user.userId);
+                                            const isMeB = String(b.userId) === String(user.userId);
+                                            if (isMeA) return -1;
+                                            if (isMeB) return 1;
+                                            if (a.isAdmin && !b.isAdmin) return -1;
+                                            if (!a.isAdmin && b.isAdmin) return 1;
+                                            return (a.username || "").localeCompare(b.username || "");
+                                        })
+                                        .slice(0, visibleRosterCount)
+                                        .map(member => (
+                                            <div key={member.userId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', borderRadius: '6px', padding: '8px', border: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
+                                                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff88', flexShrink: 0 }}></div>
+                                                    <span style={{ fontSize: '13px', fontWeight: '500', color: '#eee', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                        {member.username}
+                                                        {String(member.userId) === String(user.userId) && <span style={{ color: '#888', fontSize: '11px', marginLeft: '4px' }}>(You)</span>}
+                                                    </span>
+                                                </div>
+                                                {member.isAdmin && (
+                                                    <span style={{ fontSize: '9px', background: 'rgba(0, 100, 255, 0.15)', border: '1px solid rgba(0, 100, 255, 0.3)', color: '#44aaff', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold', textTransform: 'uppercase', flexShrink: 0, marginLeft: '8px' }}>Admin</span>
+                                                )}
+                                            </div>
+                                        ))
+                                    }
+                                    
+                                    {/* Show More Expansion Button */}
+                                    {(groupRosterKeys[activeGroup.groupId]?.length || 0) > visibleRosterCount && (
+                                        <button 
+                                            onClick={() => setVisibleRosterCount(prev => prev + 6)}
+                                            style={{ width: '100%', marginTop: '8px', padding: '8px', fontSize: '11px', fontWeight: 'bold', color: '#888', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}
+                                            className="hover-white"
+                                        >
+                                            Show More ({(groupRosterKeys[activeGroup.groupId]?.length || 0) - visibleRosterCount} remaining)
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                             
                             {/* 🛠️ ADMIN ACTION HUB */}
@@ -2333,9 +2587,122 @@ return; // Sever the global status update for group messages
                                     </div>
                                 </div>
                             )}
+
+                            {/* 📊 PHASE 6: UNIVERSAL GROUP EXIT CONTROL */}
+                            <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '15px', marginTop: '15px', marginBottom: '10px' }}>
+                                <button 
+                                    onClick={async () => {
+                                        // 1. Calculate administrative topology
+                                        const roster = groupRosterKeys[activeGroup.groupId] || [];
+                                        const myProfile = roster.find(m => String(m.userId) === String(user.userId));
+                                        const totalAdmins = roster.filter(m => m.isAdmin).length || 0;
+                                        const isLastAdmin = myProfile?.isAdmin && totalAdmins === 1;
+                                        
+                                        const warningMsg = isLastAdmin 
+                                            ? "You are the last remaining Admin. Exiting will PERMANENTLY dissolve and delete this group for everyone. Proceed?"
+                                            : "Are you sure you want to exit this group? You will lose access to future messages.";
+                                            
+                                        if (!window.confirm(warningMsg)) return;
+                                        
+                                        try {
+                                            let payload = {};
+                                            
+                                            // 2. If the group will survive, we must compute the N-Wrap Key Rotation
+                                            if (!isLastAdmin && roster.length > 1) {
+                                                const rawNewKey = await window.crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+                                                const exportedRawKey = await window.crypto.subtle.exportKey("raw", rawNewKey);
+                                                const newKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exportedRawKey)));
+                                                
+                                                const remainingMembers = roster.filter(m => String(m.userId) !== String(user.userId));
+                                                const wrappedKeyMatrixPayload = {};
+                                                
+                                                for (const peer of remainingMembers) {
+                                                    let peerPublicKey = peer.publicKey;
+                                                    if (!peerPublicKey) {
+                                                        const pkUrl = `${import.meta.env.VITE_API_URL}/api/v1/users/${peer.userId}/public-key`;
+                                                        const pkRes = await apiFetch(pkUrl);
+                                                        if (pkRes.ok) peerPublicKey = await pkRes.text();
+                                                    }
+                                                    
+                                                    if (peerPublicKey) {
+                                                        wrappedKeyMatrixPayload[peer.userId] = encryptAESKeyWithRSA(newKeyB64, peerPublicKey);
+                                                    }
+                                                }
+                                                payload = { newEncryptedKeys: wrappedKeyMatrixPayload };
+                                            }
+                                            
+                                            // 3. Dispatch to API
+                                            await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/exit`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify(payload)
+                                            });
+                                            
+                                            // 4. Soft-Delete Local UI Cleanup
+                                            setGroups(prev => prev.filter(g => String(g.groupId) !== String(activeGroup.groupId)));
+                                            setActiveGroup(null);
+                                            setShowGroupDetails(false);
+                                            
+                                        } catch (err) {
+                                            console.error("❌ Exit routine execution failed:", err);
+                                        }
+                                    }}
+                                    style={{ 
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', padding: '10px', 
+                                        background: 'rgba(255, 68, 68, 0.1)', border: '1px solid rgba(255, 68, 68, 0.3)', borderRadius: '8px', 
+                                        color: '#ff4444', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' 
+                                    }}
+                                    className="hover:bg-red-500 hover:text-white"
+                                >
+                                    <LogOut size={16} />
+                                    <span>Exit Group</span>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 📊 SURGICAL CONTACT DETAILS PANEL DRAWER */}
+                    {showContactDetails && !activeGroup && activeFriend && (
+                        <div className="w-80 bg-gray-900 border-l border-gray-800 p-4 flex flex-col h-full overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
+                            <div className="flex flex-col items-center mb-5 pb-4 border-b border-gray-800 relative">
+                                <button onClick={() => { setShowContactDetails(false); setIsEditingAlias(false); }} className="absolute top-0 right-0 text-gray-500 hover:text-gray-300">✕</button>
+                                <div className="w-20 h-20 rounded-full bg-gray-800 border-2 border-gray-700 overflow-hidden flex items-center justify-center shadow-lg mt-2 mb-3">
+                                    {activeFriend.avatar ? <img src={activeFriend.avatar} alt="Profile" className="w-full h-full object-cover" /> : <span className="text-gray-400 font-bold text-2xl">U</span>}
+                                </div>
+                                <h3 className="font-bold text-lg text-white">{activeFriend.alias || activeFriend.username}</h3>
+                            </div>
+                            
+                            <div className="flex-1 flex flex-col gap-4">
+                                <div className="bg-gray-800/30 border border-gray-800/80 rounded-lg p-3">
+                                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Global System Identifier</p>
+                                    <p className="text-sm text-gray-300 font-medium">@{activeFriend.username}</p>
+                                </div>
+                                
+                                {/* 📊 GHOST PROTOCOL RELATIONSHIP PURGE */}
+                                <div className="mt-auto pt-4 border-t border-gray-800/80">
+                                    <button 
+                                        onClick={async () => {
+                                            if(!window.confirm(`Remove ${activeFriend.username} from your friends?`)) return;
+                                            try {
+                                                await axios.delete(`${import.meta.env.VITE_API_URL}/api/v1/friends/${activeFriend.userId}/terminate`, {
+                                                    headers: { 'Authorization': `Bearer ${user.accessToken}` }
+                                                });
+                                                setFriends(prev => prev.filter(f => String(f.userId) !== String(activeFriend.userId)));
+                                                setShowContactDetails(false);
+                                                setActiveFriend(null);
+                                            } catch (err) { alert("Action rejected by infrastructure."); }
+                                        }}
+                                        className="w-full bg-red-950/20 hover:bg-red-900/40 text-red-400 border border-red-900/40 rounded-lg p-2.5 text-xs font-bold transition-all flex items-center justify-center gap-2 hover:border-red-500/50"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+                                        Terminate Friendship Context
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>
+
 
                 <div style={{ padding: '20px', borderTop: '1px solid var(--border)' }}>
                     {selectedFile && (
@@ -2717,6 +3084,46 @@ return; // Sever the global status update for group messages
                     to { transform: rotate(360deg); }
                 }
             `}</style>
+            
+            {/* 📊 ALIAS CONFIGURATION MODAL */}
+            {showAliasModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+                    <div className="glass-panel" style={{ width: '320px', background: '#0a0a0a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column' }}>
+                        <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 'bold', color: '#66fcf1', uppercase: true, letterSpacing: '1px' }}>Set Local Alias</h4>
+                        <p style={{ fontSize: '12px', color: '#888', marginBottom: '16px' }}>This name will override "{showAliasModal.username}" on your screen only.</p>
+                        <input 
+                            autoFocus
+                            type="text" 
+                            value={aliasInput} 
+                            onChange={e => setAliasInput(e.target.value)} 
+                            className="glass-input"
+                            style={{ width: '100%', marginBottom: '16px' }}
+                            placeholder="Enter custom nickname..."
+                        />
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                            <button onClick={() => setShowAliasModal(null)} className="glass-button" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', color: '#ccc' }}>Cancel</button>
+                            <button onClick={async () => {
+                                try {
+                                    const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/friends/${showAliasModal.userId}/alias`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ alias: aliasInput })
+                                    });
+                                    if (res.ok) {
+                                        setFriends(prev => prev.map(f => String(f.id) === String(showAliasModal.id) ? { ...f, alias: aliasInput } : f));
+                                        if (activeFriend && String(activeFriend.id) === String(showAliasModal.id)) {
+                                            setActiveFriend(prev => ({ ...prev, alias: aliasInput }));
+                                        }
+                                        setShowAliasModal(null);
+                                    } else {
+                                        alert("Failed to save alias.");
+                                    }
+                                } catch(err) { alert("Failed to save alias."); }
+                            }} className="glass-button" style={{ flex: 1, background: '#66fcf1', color: '#000' }}>Save Alias</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

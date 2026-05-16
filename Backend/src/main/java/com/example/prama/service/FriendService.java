@@ -69,6 +69,7 @@ public class FriendService {
                         .userId(f.getSender().getId())
                         .username(f.getSender().getUsername())
                         .email(f.getSender().getEmail())
+                        .avatar(f.getSender().getAvatar())
                         .build())
                 .collect(Collectors.toList());
     }
@@ -85,6 +86,8 @@ public class FriendService {
                             .userId(friend.getId())
                             .username(friend.getUsername())
                             .email(friend.getEmail())
+                            .alias(f.getSender().getId().equals(user.getId()) ? f.getReceiverAlias() : f.getSenderAlias())
+                            .avatar(friend.getAvatar())
                             .build();
                 })
                 .collect(Collectors.toList());

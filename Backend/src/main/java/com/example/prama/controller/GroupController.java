@@ -27,18 +27,27 @@ public class GroupController {
      * Fetch groups the current user belongs to.
      */
     @GetMapping("/my-groups")
-    public ResponseEntity<List<Map<String, Object>>> getMyGroups() {
+    public ResponseEntity<List<com.example.prama.dto.GroupDTO>> getMyGroups() {
         User currentUser = (User) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
 
-        String sql = "SELECT g.group_id as \"groupId\", g.name, " +
-                     "(SELECT count(*) FROM group_members WHERE group_id = g.group_id) as \"memberCount\" " +
+        String sql = "SELECT g.group_id, g.name, g.group_avatar, " +
+                     "(SELECT count(*) FROM group_members WHERE group_id = g.group_id) as member_count " +
                      "FROM groups g " +
                      "JOIN group_members gm ON g.group_id = gm.group_id " +
                      "WHERE gm.user_id = ?";
 
-        List<Map<String, Object>> groups = jdbcTemplate.queryForList(sql, currentUser.getId());
+        List<com.example.prama.dto.GroupDTO> groups = jdbcTemplate.query(sql, (rs, rowNum) -> 
+            com.example.prama.dto.GroupDTO.builder()
+                .groupId(UUID.fromString(rs.getString("group_id")))
+                .name(rs.getString("name"))
+                .groupAvatar(rs.getString("group_avatar"))
+                .memberCount(rs.getLong("member_count"))
+                .build(), 
+            currentUser.getId()
+        );
         return ResponseEntity.ok(groups);
     }
+
 
     /**
      * Create a new group and add initial members.

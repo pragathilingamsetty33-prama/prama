@@ -49,6 +49,9 @@ public class User implements UserDetails {
     @UpdateTimestamp
     private LocalDateTime updatedAt;
 
+    @Column(columnDefinition = "TEXT")
+    private String avatar;
+
     @Column
     private String fcmToken;
 
