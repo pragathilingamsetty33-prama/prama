@@ -87,6 +87,66 @@ public class GroupChatController {
         return ResponseEntity.ok().body(Map.of("success", true, "promotedUserId", userId));
     }
 
+    // ============================================================================
+    // AUTHENTICATED ADD MEMBER & E2EE KEY PERSISTENCE ENDPOINT (PHASE 4)
+    // ============================================================================
+    @PostMapping("/api/v1/groups/{groupId}/addMember")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> addMemberToGroup(@PathVariable String groupId, @RequestBody Map<String, String> payload, Principal principal) {
+        System.out.println("🦅 [EAGLE EYE - CRYPTO] Intercepted group inclusion pipeline request for Group ID: " + groupId);
+        String executorName = principal.getName();
+        String targetFriendId = payload.get("friendId");
+        String encryptedKeyPayload = payload.get("encryptedGroupKey"); // Admin-wrapped AES key
+        
+        // 1. Security Gate: Verify caller is an Admin of this targeted group
+        Integer adminCount = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM group_members gm JOIN prama_users u ON gm.user_id = u.id " +
+            "WHERE gm.group_id = ?::uuid AND (u.username = ? OR u.email = ?) AND gm.is_admin = true",
+            Integer.class, groupId, executorName, executorName
+        );
+            
+        if (adminCount == null || adminCount == 0) {
+            System.err.println("❌ [SECURITY RETRACTION] Non-admin context denied access to membership modification tools.");
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized operation: Admin role confirmation required.");
+        }
+        
+        // 2. Prevent Double Insertion Faults
+        Integer exists = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM group_members WHERE group_id = ?::uuid AND user_id = ?::uuid",
+            Integer.class, groupId, targetFriendId
+        );
+        if (exists != null && exists > 0) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Target user profile is already a registered group participant.");
+        }
+        
+        // 3. Persist Membership & Wrapped Key
+        jdbcTemplate.update(
+            "INSERT INTO group_members (group_id, user_id, is_admin, encrypted_group_key) VALUES (?::uuid, ?::uuid, false, ?)",
+            groupId, targetFriendId, encryptedKeyPayload
+        );
+        
+        // 4. Resolve Target Info for Broadcast
+        Map<String, Object> targetUser = jdbcTemplate.queryForMap(
+            "SELECT id, username FROM prama_users WHERE id = ?::uuid",
+            targetFriendId
+        );
+        
+        System.out.println("🦅 [EAGLE EYE - NETWORK] Membership records committed. Dispatching broadcast notification token...");
+        
+        // 5. Broadcast Real-Time Sync Packet
+        Map<String, Object> syncPacket = new HashMap<>();
+        syncPacket.put("type", "MEMBER_ADDED");
+        syncPacket.put("groupId", groupId);
+        syncPacket.put("newMember", Map.of(
+            "userId", targetUser.get("id").toString(),
+            "username", targetUser.get("username"),
+            "isAdmin", false
+        ));
+        
+        messagingTemplate.convertAndSend("/topic/group." + groupId, syncPacket);
+        return ResponseEntity.ok().body(Map.of("success", true, "message", "User integrated cleanly into cryptographic roster context."));
+    }
+
     /**
      * Handles incoming GroupMessagePackets and fanned-out delivery.
      * ZERO-KNOWLEDGE: The server only sees individual wrapped keys and routes them.
