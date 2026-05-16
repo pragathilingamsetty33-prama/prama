@@ -264,6 +264,9 @@ const Chat = () => {
     const [decryptedFiles, setDecryptedFiles] = useState({}); // { messageId: blobUrl }
     const [liveTickTrigger, setLiveTickTrigger] = useState(0);
     const [editingMessage, setEditingMessage] = useState(null);
+    const [showGroupDetails, setShowGroupDetails] = useState(false);
+    const [showPromoteModal, setShowPromoteModal] = useState(false);
+    const [selectedMemberToPromote, setSelectedMemberToPromote] = useState(null);
 
     // Keep activeFriendRef in sync
     useEffect(() => {
@@ -286,6 +289,13 @@ const Chat = () => {
                 groupSubscriptionRef.current = stompClient.current.subscribe(`/topic/group.${activeGroup.groupId}`, (msg) => {
                     const incomingPacket = JSON.parse(msg.body);
                     
+                    // 📊 WEBSOCKET SWITCH-CASE DISPATCH OVERRIDE: LIVE ROLE MANAGEMENT
+                    if (incomingPacket.type === 'ROLE_UPDATED' && activeGroup && String(incomingPacket.groupId) === String(activeGroup.groupId)) {
+                        console.log("🦅 Live role configuration update packet caught. Realignment processing initiated.");
+                        fetchGroupRoster(activeGroup.groupId); // Refresh full roster to sync flags
+                        return;
+                    }
+
                     // ROUTE 1: Handle actual chat messages (Decryption pipeline)
                     if (incomingPacket.encryptedContent || incomingPacket.type === 'CHAT_MESSAGE') {
                         handleIncomingMessage(incomingPacket);
@@ -1278,6 +1288,21 @@ return; // Sever the global status update for group messages
         }
     };
 
+    const executeAdminPromotion = async (targetUserId) => {
+        try {
+            await axios.put(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/promote/${targetUserId}`, {}, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${user.accessToken}`
+                }
+            });
+            console.log(`✅ [ADMIN] Promotion request for ${targetUserId} submitted.`);
+        } catch (err) {
+            console.error("❌ Exception captured during outbound role promotion call mapping:", err);
+            alert("Failed to promote user. Ensure you are a group admin.");
+        }
+    };
+
     const sendMessage = async () => {
         if (editingMessage) {
             await handleEditSubmit();
@@ -1627,7 +1652,15 @@ return; // Sever the global status update for group messages
 
             {/* Chat Area */}
             <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)' }}>
+                <div 
+                    onClick={() => {
+                        if (activeGroup) {
+                            console.log(`🦅 [EAGLE EYE - UI] Toggling Group Details Panel.`);
+                            setShowGroupDetails(!showGroupDetails);
+                        }
+                    }}
+                    style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)', cursor: activeGroup ? 'pointer' : 'default' }}
+                >
                     <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
                         {activeFriend || activeGroup ? (
                             <>
@@ -1635,12 +1668,13 @@ return; // Sever the global status update for group messages
                                     {(activeFriend?.username || activeGroup?.name)?.charAt(0).toUpperCase()}
                                 </div>
                                 Secure Chat with {activeFriend?.username || activeGroup?.name}
+                                {activeGroup && <span style={{ fontSize: '10px', color: '#66fcf1', opacity: 0.7 }}>(Click for Info)</span>}
                             </>
                         ) : 'Select a chat to start messaging'}
                     </h3>
                 </div>
-
-                <div style={{ flex: 1, padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+                    <div style={{ flex: 1, padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                     {(messagesByFriend[activeGroup?.groupId || activeFriend?.userId] || []).map(msg => {
                         const isMe = msg.isMe;
                         let senderName = "Unknown User";
@@ -1798,6 +1832,141 @@ return; // Sever the global status update for group messages
                         <div style={{ margin: 'auto', color: '#888', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
                             <ShieldCheck size={48} color="rgba(102, 252, 241, 0.3)" />
                             <span>Messages are end-to-end encrypted. No one else can read them.</span>
+                        </div>
+                    )}
+                    </div>
+
+                    {/* 📊 PHASE 3: DYNAMIC GROUP DETAILS INTERACTION DRAWER */}
+                    {showGroupDetails && activeGroup && (
+                        <div className="glass-panel" style={{ width: '300px', borderLeft: '1px solid var(--border)', padding: '20px', display: 'flex', flexDirection: 'column', background: 'rgba(0,0,0,0.2)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
+                                <h4 style={{ margin: 0, fontSize: '12px', color: '#66fcf1', textTransform: 'uppercase', letterSpacing: '1px' }}>Group Roster</h4>
+                                <button onClick={() => setShowGroupDetails(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '12px' }}>✕</button>
+                            </div>
+                            
+                            {/* Member Directory */}
+                            <div style={{ flex: 1, overflowY: 'auto', marginBottom: '20px' }}>
+                                {(groupRosterKeys[activeGroup.groupId] || []).map(member => (
+                                    <div key={member.userId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', borderRadius: '6px', padding: '8px 12px', marginBottom: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#00ff88' }}></div>
+                                            <span style={{ fontSize: '13px' }}>{member.username}</span>
+                                        </div>
+                                        {member.isAdmin && (
+                                            <span style={{ fontSize: '9px', background: 'rgba(102, 252, 241, 0.1)', border: '1px solid rgba(102, 252, 241, 0.3)', color: '#66fcf1', padding: '2px 5px', borderRadius: '4px', fontWeight: 'bold' }}>ADMIN</span>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                            
+                            {/* 🛠️ ADMIN ACTION HUB */}
+                            {(() => {
+                                const roster = groupRosterKeys[activeGroup.groupId] || [];
+                                const me = roster.find(m => String(m.userId) === String(user.userId));
+                                const isCurrentUserAdmin = me?.isAdmin;
+                                
+                                if (!isCurrentUserAdmin) return null;
+                                
+                                return (
+                                    <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '15px' }}>
+                                        <p style={{ fontSize: '10px', color: '#888', marginBottom: '10px', textTransform: 'uppercase', fontWeight: 'bold' }}>Administrative Suite Tools</p>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(0,0,0,0.3)', padding: '10px', borderRadius: '8px' }}>
+                                            <button 
+                                                onClick={() => {
+                                                    const nonAdmins = (groupRosterKeys[activeGroup.groupId] || []).filter(m => !m.isAdmin);
+                                                    if (!nonAdmins || nonAdmins.length === 0) {
+                                                        alert("All current members possess admin privileges.");
+                                                        return;
+                                                    }
+                                                    setShowPromoteModal(true);
+                                                }}
+                                                className="group"
+                                                style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%', padding: '10px', background: 'none', border: 'none', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}
+                                            >
+                                                <div style={{ color: '#888' }}>
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                                </div>
+                                                <span style={{ fontSize: '14px', color: '#ccc', fontWeight: '500' }}>Add Admin</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+
+                            {/* 📊 HIGH-INTENSITY IN-APP PROMOTION ROSTER MODAL */}
+                            {showPromoteModal && activeGroup && (
+                                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10001 }}>
+                                    <div className="glass-panel" style={{ width: '384px', background: '#0a0a0a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', maxHeight: '80vh' }}>
+                                        
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                                            <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 'bold', color: '#66fcf1', uppercase: true, letterSpacing: '1px' }}>Elevate to Admin Shield</h4>
+                                            <button onClick={() => { setShowPromoteModal(false); setSelectedMemberToPromote(null); }} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>✕</button>
+                                        </div>
+                                        
+                                        <p style={{ fontSize: '12px', color: '#888', margin: '12px 0' }}>Select a group member from the registry below to grant admin privileges:</p>
+                                        
+                                        {/* Render List Frame */}
+                                        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', margin: '8px 0', paddingRight: '4px' }}>
+                                            {(groupRosterKeys[activeGroup.groupId] || []).filter(m => !m.isAdmin).map(member => {
+                                                const isSelected = selectedMemberToPromote && selectedMemberToPromote.userId === member.userId;
+                                                return (
+                                                    <div 
+                                                        key={member.userId}
+                                                        onClick={() => setSelectedMemberToPromote(member)}
+                                                        style={{ 
+                                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s',
+                                                            background: isSelected ? 'rgba(102, 252, 241, 0.1)' : 'rgba(255,255,255,0.05)',
+                                                            border: isSelected ? '1px solid rgba(102, 252, 241, 0.5)' : '1px solid transparent'
+                                                        }}
+                                                    >
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: isSelected ? '#66fcf1' : '#444' }}></div>
+                                                            <span style={{ fontSize: '14px', fontWeight: '500', color: isSelected ? '#66fcf1' : '#ccc' }}>
+                                                                {member.username}
+                                                            </span>
+                                                        </div>
+                                                        {isSelected && <span style={{ color: '#66fcf1', fontSize: '12px', fontWeight: 'bold' }}>✓ Selected</span>}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        
+                                        {/* Modal Action Footer Controls */}
+                                        <div style={{ display: 'flex', gap: '10px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.1)', marginTop: '12px' }}>
+                                            <button 
+                                                onClick={() => { setShowPromoteModal(false); setSelectedMemberToPromote(null); }}
+                                                style={{ flex: 1, background: 'rgba(255,255,255,0.05)', color: '#ccc', fontSize: '12px', fontWeight: 'bold', padding: '10px', borderRadius: '8px', border: 'none', cursor: 'pointer' }}
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button 
+                                                disabled={!selectedMemberToPromote}
+                                                onClick={async () => {
+                                                    if (!selectedMemberToPromote) return;
+                                                    console.log(`🦅 [EAGLE EYE] Submitting promotion pipeline for: ${selectedMemberToPromote.userId}`);
+                                                    
+                                                    try {
+                                                        await executeAdminPromotion(selectedMemberToPromote.userId);
+                                                        setShowPromoteModal(false);
+                                                        setSelectedMemberToPromote(null);
+                                                    } catch (err) {
+                                                        console.error("API error during component confirm invocation:", err);
+                                                    }
+                                                }}
+                                                style={{ 
+                                                    flex: 1, fontSize: '12px', fontWeight: 'bold', padding: '10px', borderRadius: '8px', border: 'none', transition: 'all 0.2s',
+                                                    background: selectedMemberToPromote ? '#66fcf1' : '#222',
+                                                    color: selectedMemberToPromote ? '#000' : '#444',
+                                                    cursor: selectedMemberToPromote ? 'pointer' : 'not-allowed'
+                                                }}
+                                            >
+                                                Confirm Promotion
+                                            </button>
+                                        </div>
+                                        
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
