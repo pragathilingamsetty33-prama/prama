@@ -36,7 +36,169 @@ public class ChatController {
     private final SimpMessagingTemplate messagingTemplate;
     private final UserRepository userRepository;
     private final MessageRepository messageRepository;
+    private final com.example.prama.repository.GroupMessageRepository groupMessageRepository;
     private final NotificationService notificationService;
+
+    // ============================================================================
+    // HARDENED NON-NULL COMPLIANT REVOCATION ENDPOINT (UNIVERSAL STRING UUID MAPS)
+    // ============================================================================
+    @org.springframework.web.bind.annotation.DeleteMapping("/api/v1/messages/{messageId}/revoke")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> revokeMessage(@PathVariable String messageId, java.security.Principal principal) {
+        String principalName = principal.getName();
+
+        UUID msgUuid;
+        try {
+            msgUuid = UUID.fromString(messageId);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(org.springframework.http.HttpStatus.BAD_REQUEST).body("Invalid identifier format.");
+        }
+        
+        // 1. SCAN LAYER A: Group Message Repository Space
+        if (groupMessageRepository != null) {
+            java.util.Optional<com.example.prama.entity.GroupMessage> groupMsgOpt = groupMessageRepository.findById(msgUuid);
+            if (groupMsgOpt.isPresent()) {
+                com.example.prama.entity.GroupMessage gMsg = groupMsgOpt.get();
+                
+                User sender = userRepository.findById(gMsg.getSenderId()).orElse(null);
+                if (sender == null || (!principalName.equals(sender.getEmail()) && 
+                    !principalName.equals(sender.getId().toString()) && 
+                    !principalName.equals(sender.getUsername()))) {
+                    return ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).body("Access claims rejected.");
+                }
+                
+                // Fix: Overwrite content with safe empty text to satisfy NOT NULL constraints
+                gMsg.setDeleted(true);
+                gMsg.setEncryptedContent(""); 
+                groupMessageRepository.save(gMsg);
+                
+                Map<String, Object> gPacket = new HashMap<>();
+                gPacket.put("type", "MESSAGE_REVOKED");
+                gPacket.put("messageId", messageId);
+                gPacket.put("chatType", "GROUP");
+                gPacket.put("groupId", gMsg.getGroupId().toString());
+                
+                messagingTemplate.convertAndSend("/topic/group." + gMsg.getGroupId(), gPacket);
+                return ResponseEntity.ok().body(Map.of("success", true, "messageId", messageId));
+            }
+        }
+
+        // 2. SCAN LAYER B: Private Message Repository Space
+        java.util.Optional<Message> privateMsgOpt = messageRepository.findById(msgUuid);
+        if (privateMsgOpt.isPresent()) {
+            Message pMsg = privateMsgOpt.get();
+            
+            if (!principalName.equals(pMsg.getSender().getEmail()) && 
+                !principalName.equals(pMsg.getSender().getId().toString()) && 
+                !principalName.equals(pMsg.getSender().getUsername())) {
+                System.err.println("❌ Auth claim mismatch. Principal: " + principalName + " vs Sender Username: " + pMsg.getSender().getUsername());
+                return ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).body("Access claims rejected.");
+            }
+            
+            // Fix: Overwrite content with safe empty text to satisfy NOT NULL constraints
+            pMsg.setDeleted(true);
+            pMsg.setEncryptedContent(""); 
+            messageRepository.save(pMsg);
+            
+            Map<String, Object> pPacket = new HashMap<>();
+            pPacket.put("type", "MESSAGE_REVOKED");
+            pPacket.put("messageId", messageId);
+            pPacket.put("chatType", "PRIVATE");
+            
+            executePrivateShotgunBroadcast(pMsg, pPacket);
+            return ResponseEntity.ok().body(Map.of("success", true, "messageId", messageId));
+        }
+
+        return ResponseEntity.status(org.springframework.http.HttpStatus.NOT_FOUND).body("Target unique entity could not be resolved.");
+    }
+
+    // ============================================================================
+    // HARDENED NON-NULL COMPLIANT EDITING ENDPOINT (UNIVERSAL STRING UUID MAPS)
+    // ============================================================================
+    @org.springframework.web.bind.annotation.PutMapping("/api/v1/messages/{messageId}/edit")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> editMessage(@PathVariable String messageId, @org.springframework.web.bind.annotation.RequestBody Map<String, String> payload, java.security.Principal principal) {
+        String principalName = principal.getName();
+
+        UUID msgUuid;
+        try {
+            msgUuid = UUID.fromString(messageId);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(org.springframework.http.HttpStatus.BAD_REQUEST).body("Invalid identifier format.");
+        }
+        
+        // 1. SCAN LAYER A: Group Message Space
+        if (groupMessageRepository != null) {
+            java.util.Optional<com.example.prama.entity.GroupMessage> groupMsgOpt = groupMessageRepository.findById(msgUuid);
+            if (groupMsgOpt.isPresent()) {
+                com.example.prama.entity.GroupMessage gMsg = groupMsgOpt.get();
+                User sender = userRepository.findById(gMsg.getSenderId()).orElse(null);
+                
+                if (sender == null || (!principalName.equals(sender.getEmail()) && 
+                    !principalName.equals(sender.getId().toString()) && 
+                    !principalName.equals(sender.getUsername()))) {
+                    return ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).body("Modification claims rejected.");
+                }
+                
+                gMsg.setEncryptedContent(payload.get("encryptedContent"));
+                gMsg.setIv(payload.get("iv"));
+                gMsg.setTag(payload.get("tag"));
+                gMsg.setEdited(true);
+                groupMessageRepository.save(gMsg);
+                
+                Map<String, Object> gPacket = new HashMap<>();
+                gPacket.put("type", "MESSAGE_EDITED");
+                gPacket.put("messageId", messageId);
+                gPacket.put("encryptedContent", payload.get("encryptedContent"));
+                gPacket.put("iv", payload.get("iv"));
+                gPacket.put("tag", payload.get("tag"));
+                gPacket.put("chatType", "GROUP");
+                gPacket.put("groupId", gMsg.getGroupId().toString());
+                
+                messagingTemplate.convertAndSend("/topic/group." + gMsg.getGroupId(), gPacket);
+                return ResponseEntity.ok().body(Map.of("success", true, "messageId", messageId));
+            }
+        }
+
+        // 2. SCAN LAYER B: Private Message Space
+        java.util.Optional<Message> privateMsgOpt = messageRepository.findById(msgUuid);
+        if (privateMsgOpt.isPresent()) {
+            Message pMsg = privateMsgOpt.get();
+            if (!principalName.equals(pMsg.getSender().getEmail()) && 
+                !principalName.equals(pMsg.getSender().getId().toString()) && 
+                !principalName.equals(pMsg.getSender().getUsername())) {
+                return ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).body("Modification claims rejected.");
+            }
+            
+            pMsg.setEncryptedContent(payload.get("encryptedContent"));
+            pMsg.setIv(payload.get("iv"));
+            pMsg.setTag(payload.get("tag"));
+            pMsg.setEdited(true);
+            messageRepository.save(pMsg);
+            
+            Map<String, Object> pPacket = new HashMap<>();
+            pPacket.put("type", "MESSAGE_EDITED");
+            pPacket.put("messageId", messageId);
+            pPacket.put("encryptedContent", payload.get("encryptedContent"));
+            pPacket.put("iv", payload.get("iv"));
+            pPacket.put("tag", payload.get("tag"));
+            pPacket.put("chatType", "PRIVATE");
+            
+            executePrivateShotgunBroadcast(pMsg, pPacket);
+            return ResponseEntity.ok().body(Map.of("success", true, "messageId", messageId));
+        }
+
+        return ResponseEntity.status(org.springframework.http.HttpStatus.NOT_FOUND).body("Target unique entity could not be resolved.");
+    }
+
+    private void executePrivateShotgunBroadcast(Message pMsg, Map<String, Object> packet) {
+        String sId = pMsg.getSender().getId().toString();
+        String rId = pMsg.getRecipient().getId().toString();
+        messagingTemplate.convertAndSendToUser(sId, "/queue/messages", packet);
+        messagingTemplate.convertAndSendToUser(rId, "/queue/messages", packet);
+        messagingTemplate.convertAndSendToUser(pMsg.getSender().getEmail(), "/queue/messages", packet);
+        messagingTemplate.convertAndSendToUser(pMsg.getRecipient().getEmail(), "/queue/messages", packet);
+    }
 
     @GetMapping("/api/v1/messages/{friendId}")
     @ResponseBody

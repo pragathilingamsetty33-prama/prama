@@ -47,6 +47,12 @@ public class GroupMessage {
     @Builder.Default
     private Map<String, String> wrappedKeys = new HashMap<>();
 
+    @Column(name = "is_deleted")
+    private boolean isDeleted = false;
+
+    @Column(name = "is_edited")
+    private boolean isEdited = false;
+
     @PrePersist
     protected void onCreate() {
         if (timestamp == null) {

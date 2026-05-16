@@ -50,6 +50,12 @@ public class Message {
     @Builder.Default
     private String status = "SENT"; // SENT, DELIVERED, READ
 
+    @Column(name = "is_deleted")
+    private boolean isDeleted = false;
+
+    @Column(name = "is_edited")
+    private boolean isEdited = false;
+
     @PrePersist
     protected void onCreate() {
         timestamp = Instant.now();

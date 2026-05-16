@@ -9,6 +9,7 @@ import { KeyCache } from '../utils/KeyCache';
 import forge from 'node-forge';
 import { messaging } from '../firebase';
 import { getToken } from "firebase/messaging";
+import axios from 'axios';
 
 const openPramaDB = () => {
     return new Promise((resolve, reject) => {
@@ -52,6 +53,16 @@ const cacheFile = async (id, blob) => {
 
 const purgePramaCache = () => {
     indexedDB.deleteDatabase("PramaAttachmentCache");
+};
+
+const purgeSingleCachedFile = async (messageId) => {
+    try {
+        const db = await openPramaDB(); 
+        const transaction = db.transaction("attachments", "readwrite");
+        transaction.objectStore("attachments").delete(String(messageId));
+    } catch (err) {
+        console.error("Cache purge runtime exception:", err);
+    }
 };
 
 const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache, setAttachmentCache, onForward, decryptedFiles, setDecryptedFiles }) => {
@@ -252,6 +263,7 @@ const Chat = () => {
     const [groupRosterKeys, setGroupRosterKeys] = useState({}); // { groupId: [ { userId, publicKey }, ... ] }
     const [decryptedFiles, setDecryptedFiles] = useState({}); // { messageId: blobUrl }
     const [liveTickTrigger, setLiveTickTrigger] = useState(0);
+    const [editingMessage, setEditingMessage] = useState(null);
 
     // Keep activeFriendRef in sync
     useEffect(() => {
@@ -837,6 +849,54 @@ const Chat = () => {
                     if (typeof setCurrentChatUser === 'function') setCurrentChatUser(updateActiveRef);
                     return;
                 }
+
+                // 🚨 WEBSOCKET SWITCH-CASE DISPATCH OVERRIDES
+                // Condition 1: Live Message Revocation Catch
+                if (incomingPacket.type === 'MESSAGE_REVOKED') {
+                    const targetId = incomingPacket.messageId;
+                    
+                    setMessagesByFriend(prev => {
+                        const store = { ...prev };
+                        Object.keys(store).forEach(fId => {
+                            store[fId] = store[fId].map(m => String(m.id) === String(targetId) ? { ...m, isDeleted: true, content: null, encryptedContent: null, attachment: null } : m);
+                        });
+                        return store;
+                    });
+                    if (typeof setGroupMessages === 'function') {
+                        setGroupMessages(prev => prev.map(m => String(m.id) === String(targetId) ? { ...m, isDeleted: true, content: null, encryptedContent: null, attachment: null } : m));
+                    }
+                    purgeSingleCachedFile(targetId); // Force-purge physical attachments out of client IndexedDB cache
+                    return;
+                }
+
+                // Condition 2: Live Message Edit Payload Mutation
+                if (incomingPacket.type === 'MESSAGE_EDITED') {
+                    const targetId = incomingPacket.messageId;
+                    
+                    setMessagesByFriend(prev => {
+                        const store = { ...prev };
+                        Object.keys(store).forEach(fId => {
+                            store[fId] = store[fId].map(m => String(m.id) === String(targetId) ? { 
+                                ...m, 
+                                isEdited: true, 
+                                encryptedContent: incomingPacket.encryptedContent, 
+                                iv: incomingPacket.iv, 
+                                tag: incomingPacket.tag 
+                            } : m);
+                        });
+                        return store;
+                    });
+                    if (typeof setGroupMessages === 'function') {
+                        setGroupMessages(prev => prev.map(m => String(m.id) === String(targetId) ? { 
+                            ...m, 
+                            isEdited: true, 
+                            encryptedContent: incomingPacket.encryptedContent, 
+                            iv: incomingPacket.iv, 
+                            tag: incomingPacket.tag 
+                        } : m));
+                    }
+                    return;
+                }
             });
         };
 
@@ -1102,7 +1162,127 @@ return; // Sever the global status update for group messages
         setShowCamera(false);
     };
 
+    const executeMessageRevocation = async (messageId) => {
+        if (!window.confirm("Delete this message for everyone?")) return;
+        try {
+            // 📊 ENFORCED JSON ENVELOPE HEADER FOR REVOCATIONS
+            const res = await axios.delete(`${import.meta.env.VITE_API_URL}/api/v1/messages/${messageId}/revoke`, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${user.accessToken}`
+                }
+            });
+            if (res.status === 200) {
+                // 📊 OPTIMISTIC STATE PURGE - Triggers immediate repaint without chat switching
+                setMessagesByFriend(prev => {
+                    const store = { ...prev };
+                    Object.keys(store).forEach(fId => {
+                        store[fId] = store[fId].map(m => String(m.id) === String(messageId) ? { ...m, isDeleted: true, content: "", attachment: null } : m);
+                    });
+                    return store;
+                });
+                
+                purgeSingleCachedFile(messageId);
+            }
+        } catch (e) {
+            console.error("Error submitting message revocation stream:", e);
+        }
+    };
+
+    const triggerInlineEditMode = (msg) => {
+        if (!msg) return;
+        setEditingMessage(msg);
+        setInputMsg(msg.content || ""); // content contains the decrypted text in our state
+    };
+
+    const cancelEdit = () => {
+        setEditingMessage(null);
+        setInputMsg("");
+    };
+
+    const handleEditSubmit = async (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        
+        const targetMsg = editingMessage; 
+        const updatePlaintext = inputMsg; 
+        
+        if (!targetMsg) return;
+        
+        const targetMessageId = targetMsg.id;
+        
+        try {
+            setIsUploading(true);
+            
+            // Retrieve original AES key from cache
+            const aesKeyStr = KeyCache.getKey(targetMessageId);
+            if (!aesKeyStr) {
+                setIsUploading(false);
+                return;
+            }
+
+            const messagePayloadObj = {
+                text: updatePlaintext,
+                attachment: targetMsg.attachment 
+            };
+            
+            const encryptedData = encryptMessageWithAES(JSON.stringify(messagePayloadObj), aesKeyStr);
+            
+            const outboundJsonPayload = {
+                encryptedContent: encryptedData.ciphertext,
+                iv: encryptedData.iv,
+                tag: encryptedData.tag
+            };
+            
+            // Execute the network request using clean application/json headers
+            axios.put(`${import.meta.env.VITE_API_URL}/api/v1/messages/${targetMessageId}/edit`, outboundJsonPayload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${user.accessToken}`
+                }
+            })
+            .then(res => {
+                
+                // Instant UI view update sequence
+                setMessagesByFriend(prev => {
+                    const store = { ...prev };
+                    Object.keys(store).forEach(fId => {
+                        store[fId] = store[fId].map(m => String(m.id) === String(targetMessageId) ? { 
+                            ...m, 
+                            isEdited: true, 
+                            content: updatePlaintext, // Decrypted for local view
+                            encryptedContent: encryptedData.ciphertext,
+                            iv: encryptedData.iv, 
+                            tag: encryptedData.tag 
+                        } : m);
+                    });
+                    return store;
+                });
+                
+                setEditingMessage(null);
+                setInputMsg("");
+            })
+            .catch(axiosErr => {
+                console.error("❌ Message edit failed on server boundary.");
+                if (axiosErr.response) {
+                    console.error("   -> HTTP Response Code Status:", axiosErr.response.status);
+                    console.error("   -> Server Error Payload Response Text:", axiosErr.response.data);
+                } else {
+                    console.error("   -> Network Pipeline Structural Trace Error message:", axiosErr.message);
+                }
+            });
+            
+        } catch (cryptoErr) {
+            console.error("❌ [EDIT TRACE CRASH] Front-end cryptographic wrapper processing exception:", cryptoErr);
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
     const sendMessage = async () => {
+        if (editingMessage) {
+            await handleEditSubmit();
+            return;
+        }
         const activeContext = activeFriend || activeGroup;
         if ((!inputMsg.trim() && !selectedFile) || !activeContext || !stompClient.current) return;
 
@@ -1244,7 +1424,7 @@ return; // Sever the global status update for group messages
             setMessagesByFriend(prev => ({
                 ...prev,
                 [chatId]: [...(prev[chatId] || []), {
-                    id: Date.now(),
+                    id: crypto.randomUUID(),
                     sender: user.userId,
                     content: inputMsg,
                     attachment: attachmentData,
@@ -1525,22 +1705,39 @@ return; // Sever the global status update for group messages
                             displayStatus = isRead ? 'READ' : msg.status;
                         }
 
+                        // Rule 1: Priority Tombstone Check
+                        if (msg.isDeleted || msg.is_deleted) {
+                            return (
+                                <div key={msg.id} style={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: '70%', margin: '4px 0', fontStyle: 'italic', color: '#888', fontSize: '12px' }}>
+                                    <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: '8px', padding: '8px 12px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '6px', opacity: 0.6 }}>
+                                        🚫 This message was deleted for everyone
+                                    </div>
+                                </div>
+                            );
+                        }
+
+                        let clearText = msg.content;
+                        if (msg.isEdited || msg.is_edited) {
+                            clearText += " (edited)";
+                        }
+
                         return (
-                        <div key={msg.id} style={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: '70%' }}>
+                        <div key={msg.id} className="group" style={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: '70%', position: 'relative' }}>
                             {/* FORCE SYNC: {liveTickTrigger} */}
                             {!isMe && activeGroup && (
                                 <div style={{ fontSize: '12px', color: '#00ff88', marginBottom: '4px', marginLeft: '4px', fontWeight: 'bold' }}>
                                     {senderName}
                                 </div>
                             )}
-                            <div style={{ 
-                                padding: '12px 16px', 
-                                borderRadius: isMe ? '16px 16px 0 16px' : '16px 16px 16px 0',
-                                background: isMe ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
-                                color: isMe ? '#000' : 'var(--text-main)',
-                                boxShadow: '0 2px 10px rgba(0,0,0,0.1)'
-                            }}>
-                                {msg.content}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexDirection: isMe ? 'row-reverse' : 'row' }}>
+                                <div style={{ 
+                                    padding: '12px 16px', 
+                                    borderRadius: isMe ? '16px 16px 0 16px' : '16px 16px 16px 0',
+                                    background: isMe ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
+                                    color: isMe ? '#000' : 'var(--text-main)',
+                                    boxShadow: '0 2px 10px rgba(0,0,0,0.1)'
+                                }}>
+                                    {clearText}
                                 {msg.attachment && (
                                     <AttachmentViewer 
                                         attachment={msg.attachment} 
@@ -1552,6 +1749,26 @@ return; // Sever the global status update for group messages
                                         decryptedFiles={decryptedFiles}
                                         setDecryptedFiles={setDecryptedFiles}
                                     />
+                                )}
+                                </div>
+
+                                {isMe && !msg.isDeleted && !msg.is_deleted && (
+                                    <div className="message-actions" style={{ display: 'flex', gap: '4px', opacity: 0, transition: 'opacity 0.2s' }}>
+                                        <button 
+                                            onClick={() => triggerInlineEditMode(msg)} 
+                                            style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: '4px' }}
+                                            title="Edit Message"
+                                        >
+                                            ✏️
+                                        </button>
+                                        <button 
+                                            onClick={() => executeMessageRevocation(msg.id)} 
+                                            style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: '4px' }}
+                                            title="Delete for Everyone"
+                                        >
+                                            🗑️
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                             <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: isMe ? 'flex-end' : 'flex-start', gap: '4px' }}>
@@ -1591,6 +1808,17 @@ return; // Sever the global status update for group messages
                             <FileIcon size={16} color="#00ff88" />
                             <span style={{ fontSize: '14px', color: '#00ff88', flex: 1 }}>{selectedFile.name}</span>
                             <button onClick={() => setSelectedFile(null)} style={{ background: 'none', border: 'none', color: '#ff6b6b', cursor: 'pointer', fontWeight: 'bold' }}>X</button>
+                        </div>
+                    )}
+                    {editingMessage && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', background: 'rgba(102,252,241,0.1)', borderRadius: '8px', marginBottom: '10px', borderLeft: '4px solid var(--accent)' }}>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '11px', color: 'var(--accent)', fontWeight: 'bold' }}>EDITING MESSAGE</div>
+                                <div style={{ fontSize: '13px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '400px' }}>
+                                    {editingMessage.content}
+                                </div>
+                            </div>
+                            <button onClick={cancelEdit} className="glass-button" style={{ padding: '4px 8px', fontSize: '11px', height: 'auto' }}>CANCEL</button>
                         </div>
                     )}
                     <div style={{ display: 'flex', gap: '10px' }}>

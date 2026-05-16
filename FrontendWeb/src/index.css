@@ -90,3 +90,8 @@ body {
   background: var(--accent);
   border-radius: 4px;
 }
+
+/* Message Actions Hover */
+.group:hover .message-actions {
+  opacity: 1 !important;
+}
