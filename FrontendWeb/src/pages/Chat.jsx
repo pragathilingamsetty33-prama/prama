@@ -269,6 +269,7 @@ const Chat = () => {
     const [selectedMemberToPromote, setSelectedMemberToPromote] = useState(null);
     const [showAddMemberModal, setShowAddMemberModal] = useState(false);
     const [selectedFriendToAdd, setSelectedFriendToAdd] = useState(null);
+    const [showRemoveMemberModal, setShowRemoveMemberModal] = useState(false);
 
     // Keep activeFriendRef in sync
     useEffect(() => {
@@ -293,15 +294,75 @@ const Chat = () => {
                     
                     // 📊 WEBSOCKET SWITCH-CASE DISPATCH OVERRIDE: LIVE ROLE MANAGEMENT
                     if (incomingPacket.type === 'ROLE_UPDATED' && activeGroup && String(incomingPacket.groupId) === String(activeGroup.groupId)) {
-                        console.log("🦅 Live role configuration update packet caught. Realignment processing initiated.");
                         fetchGroupRoster(activeGroup.groupId); // Refresh full roster to sync flags
                         return;
                     }
 
                     // 📊 WEBSOCKET SWITCH-CASE OVERRIDE: LIVE ROSTER DIRECTORY Handlers
                     if (incomingPacket.type === 'MEMBER_ADDED' && activeGroup && String(incomingPacket.groupId) === String(activeGroup.groupId)) {
-                        console.log("🦅 Live participant inclusion event intercepted. Realignment processing initiated.");
                         fetchGroupRoster(activeGroup.groupId); // Refresh full roster
+                        return;
+                    }
+
+                    // 📊 REFACTORED WEBSOCKET SWITCH-CASE: SECURE FORWARD SECRECY RE-KEYING LIFECYCLE
+                    if (incomingPacket.type === 'MEMBER_KICKED' && activeGroup && String(incomingPacket.groupId) === String(activeGroup.groupId)) {
+                        
+                        // CASE A: Current user is the one evicted -> Force close chat panel instantly
+                        if (String(incomingPacket.kickedUserId) === String(user.userId)) {
+                            if (typeof setActiveGroup === 'function') setActiveGroup(null);
+                            alert("Your session access privilege clearances for this conversation space have expired.");
+                            return;
+                        }
+                        
+                        // ============================================================================
+                        // FIX 1: UPDATE ROSTER FILTER IMMEDIATELY (Prevents view-lag regardless of crypto type)
+                        // ============================================================================
+                        if (typeof setActiveGroup === 'function') {
+                            setActiveGroup(prev => {
+                                if (!prev) return prev;
+                                return {
+                                    ...prev,
+                                    members: (prev.members || []).filter(m => String(m.userId) !== String(incomingPacket.kickedUserId))
+                                };
+                            });
+                        }
+                        
+                        // CASE B: Remaining group participant path -> Hot-swap memory key strings securely
+                        const freshWrappedKeyMap = incomingPacket.rotatedKeys;
+                        const currentUserIdStr = String(user.userId);
+                        
+                        if (freshWrappedKeyMap && freshWrappedKeyMap[currentUserIdStr]) {
+                            const targetWrappedKeyB64 = freshWrappedKeyMap[currentUserIdStr];
+                            
+                            // Auto-detect functional cryptographic namespace handles active in code
+                            const decryptFn = typeof decryptAESKeyWithRSA === 'function' ? decryptAESKeyWithRSA : null;
+                            
+                            if (decryptFn) {
+                                // ============================================================================
+                                // FIX 2: UNIVERSAL PROMISE WRAPPER (Safely handles both Sync & Async returns)
+                                // ============================================================================
+                                Promise.resolve(decryptFn(targetWrappedKeyB64, keys.privateKey))
+                                    .then(clearSymmetricKeyBytes => {
+                                        if (typeof setActiveGroup === 'function') {
+                                            setActiveGroup(prev => {
+                                                if (!prev) return prev;
+                                                return {
+                                                    ...prev,
+                                                    decryptedKey: clearSymmetricKeyBytes
+                                                };
+                                            });
+                                        }
+                                        // Also update the groupRosterKeys cache for roster consistency
+                                        fetchGroupRoster(activeGroup.groupId);
+                                    })
+                                    .catch(cryptoErr => {
+                                        console.error("❌ Key rotation decryption pipeline failed:", cryptoErr);
+                                    });
+                            }
+                        } else {
+                            // Roster update fallback
+                            fetchGroupRoster(activeGroup.groupId);
+                        }
                         return;
                     }
 
@@ -1732,7 +1793,6 @@ return; // Sever the global status update for group messages
                 <div 
                     onClick={() => {
                         if (activeGroup) {
-                            console.log(`🦅 [EAGLE EYE - UI] Toggling Group Details Panel.`);
                             setShowGroupDetails(!showGroupDetails);
                         }
                     }}
@@ -1984,6 +2044,19 @@ return; // Sever the global status update for group messages
                                                 </div>
                                                 <span style={{ fontSize: '14px', fontWeight: '500' }}>Add Admin</span>
                                             </button>
+
+                                            {/* 🔴 Remove Member Action Row Upgrade */}
+                                            <button 
+                                                onClick={() => setShowRemoveMemberModal(true)}
+                                                style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%', padding: '10px', background: 'none', border: 'none', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}
+                                                className="group text-gray-300 hover:bg-gray-900 hover:text-red-400"
+                                                title="Remove Member"
+                                            >
+                                                <div style={{ color: '#888' }} className="group-hover:text-red-400">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" x1="16" y2="19" y2="19"/></svg>
+                                                </div>
+                                                <span style={{ fontSize: '14px', fontWeight: '500' }}>Remove Member</span>
+                                            </button>
                                         </div>
                                     </div>
                                 );
@@ -2100,6 +2173,93 @@ return; // Sever the global status update for group messages
                                 </div>
                             )}
 
+                            {/* 📊 PHASE 5: SECURE CRYPTOGRAPHIC KEY ROTATION & EVICTION DRAWER */}
+                            {showRemoveMemberModal && activeGroup && (
+                                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10001 }}>
+                                    <div className="glass-panel" style={{ width: '384px', background: '#0a0a0a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', maxHeight: '80vh', color: '#ccc' }}>
+                                        
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                                            <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 'bold', color: '#ff4444', uppercase: true, letterSpacing: '1px' }}>Evict Participant & Rotate Key</h4>
+                                            <button onClick={() => setShowRemoveMemberModal(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>✕</button>
+                                        </div>
+                                        
+                                        <p style={{ fontSize: '12px', color: '#888', margin: '12px 0' }}>Select a participant to revoke room privileges. Kicking executes an instant cryptographic key roll across remaining clients:</p>
+                                        
+                                        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', margin: '8px 0', paddingRight: '4px' }}>
+                                            {(groupRosterKeys[activeGroup.groupId] || []).filter(m => String(m.userId) !== String(user.userId)).map(member => (
+                                                <div key={member.userId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '10px 12px' }}>
+                                                    <span style={{ fontSize: '14px', fontWeight: '500' }}>{member.username}</span>
+                                                    <button 
+                                                        onClick={async () => {
+                                                            const confirmKick = window.confirm(`Are you certain you wish to cryptographically isolate ${member.username}?`);
+                                                            if (!confirmKick) return;
+                                                            
+                                                            try {
+                                                                // 1. Generate brand new pristine symmetric group conversation key via WebCrypto
+                                                                const rawNewKey = await window.crypto.subtle.generateKey(
+                                                                    { name: "AES-GCM", length: 256 },
+                                                                    true,
+                                                                    ["encrypt", "decrypt"]
+                                                                );
+                                                                const exportedRawKey = await window.crypto.subtle.exportKey("raw", rawNewKey);
+                                                                const newKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exportedRawKey)));
+                                                                
+                                                                // 2. Isolate remaining user rosters strictly excluding the evicted profile
+                                                                const roster = groupRosterKeys[activeGroup.groupId] || [];
+                                                                const remainingMembers = roster.filter(m => String(m.userId) !== String(member.userId));
+                                                                const wrappedKeyMatrixPayload = {};
+                                                                
+                                                                // 3. Core N-Wrap execution matrix loop
+                                                                for (const peer of remainingMembers) {
+                                                                    let peerPublicKey = peer.publicKey;
+                                                                    
+                                                                    // On-demand fetch fallback query layer if missing
+                                                                    if (!peerPublicKey) {
+                                                                        const pkUrl = `${import.meta.env.VITE_API_URL}/api/v1/users/${peer.userId}/public-key`;
+                                                                        const pkRes = await apiFetch(pkUrl);
+                                                                        if (pkRes.ok) {
+                                                                            peerPublicKey = await pkRes.text();
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    if (peerPublicKey) {
+                                                                        wrappedKeyMatrixPayload[peer.userId] = encryptAESKeyWithRSA(newKeyB64, peerPublicKey);
+                                                                    }
+                                                                }
+                                                                
+                                                                // 4. Submit transaction payload package
+                                                                await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${activeGroup.groupId}/removeMember`, {
+                                                                    method: 'POST',
+                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                    body: JSON.stringify({
+                                                                        kickedUserId: String(member.userId),
+                                                                        newEncryptedKeys: wrappedKeyMatrixPayload
+                                                                    })
+                                                                });
+                                                                
+                                                                setShowRemoveMemberModal(false);
+                                                            } catch (err) {
+                                                                console.error("Critical failure during E2EE Forward Secrecy rotation routine:", err);
+                                                            }
+                                                        }}
+                                                        style={{ 
+                                                            background: 'rgba(255, 68, 68, 0.1)', color: '#ff4444', border: '1px solid rgba(255, 68, 68, 0.3)', 
+                                                            padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' 
+                                                        }}
+                                                        className="hover:bg-red-500 hover:text-white"
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            {(groupRosterKeys[activeGroup.groupId] || []).filter(m => String(m.userId) !== String(user.userId)).length === 0 && (
+                                                <p style={{ fontSize: '12px', color: '#555', fontStyle: 'italic', textAlign: 'center', padding: '20px 0' }}>No remaining members available to evict.</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* 📊 HIGH-INTENSITY IN-APP PROMOTION ROSTER MODAL */}
                             {showPromoteModal && activeGroup && (
                                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10001 }}>
@@ -2150,7 +2310,6 @@ return; // Sever the global status update for group messages
                                                 disabled={!selectedMemberToPromote}
                                                 onClick={async () => {
                                                     if (!selectedMemberToPromote) return;
-                                                    console.log(`🦅 [EAGLE EYE] Submitting promotion pipeline for: ${selectedMemberToPromote.userId}`);
                                                     
                                                     try {
                                                         await executeAdminPromotion(selectedMemberToPromote.userId);

@@ -48,7 +48,6 @@ public class GroupChatController {
     @PutMapping("/api/v1/groups/{groupId}/promote/{userId}")
     @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> promoteToAdmin(@PathVariable String groupId, @PathVariable String userId, Principal principal) {
-        System.out.println("🦅 [EAGLE EYE - BACKEND] Admin promotion request intercepted for Group: " + groupId + " -> Target User: " + userId);
         String callerIdentity = principal.getName();
         
         // 1. Security Gate: Verify the executing user is already a certified admin
@@ -73,8 +72,6 @@ public class GroupChatController {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Target user profile is not a registered member of this group.");
         }
         
-        System.out.println("🦅 [EAGLE EYE - BACKEND] Role table updated in DB. Dispatching STOMP sync notification...");
-        
         // 3. Real-Time Sync Broadcast
         Map<String, Object> rolePacket = new HashMap<>();
         rolePacket.put("type", "ROLE_UPDATED");
@@ -93,7 +90,6 @@ public class GroupChatController {
     @PostMapping("/api/v1/groups/{groupId}/addMember")
     @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> addMemberToGroup(@PathVariable String groupId, @RequestBody Map<String, String> payload, Principal principal) {
-        System.out.println("🦅 [EAGLE EYE - CRYPTO] Intercepted group inclusion pipeline request for Group ID: " + groupId);
         String executorName = principal.getName();
         String targetFriendId = payload.get("friendId");
         String encryptedKeyPayload = payload.get("encryptedGroupKey"); // Admin-wrapped AES key
@@ -131,8 +127,6 @@ public class GroupChatController {
             targetFriendId
         );
         
-        System.out.println("🦅 [EAGLE EYE - NETWORK] Membership records committed. Dispatching broadcast notification token...");
-        
         // 5. Broadcast Real-Time Sync Packet
         Map<String, Object> syncPacket = new HashMap<>();
         syncPacket.put("type", "MEMBER_ADDED");
@@ -145,6 +139,63 @@ public class GroupChatController {
         
         messagingTemplate.convertAndSend("/topic/group." + groupId, syncPacket);
         return ResponseEntity.ok().body(Map.of("success", true, "message", "User integrated cleanly into cryptographic roster context."));
+    }
+
+    // ============================================================================
+    // AUTHENTICATED MEMBER EVICTION & KEY ROTATION STORAGE API (PHASE 5)
+    // ============================================================================
+    @PostMapping("/api/v1/groups/{groupId}/removeMember")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> removeMemberAndRotateKey(
+            @PathVariable String groupId, 
+            @RequestBody Map<String, Object> payload, 
+            Principal principal) {
+            
+        String callerIdentity = principal.getName();
+        String kickedUserId = (String) payload.get("kickedUserId");
+        
+        // Map containing user ID keys pointing to their new admin-wrapped RSA keys
+        Map<String, String> rotatedKeysMap = (Map<String, String>) payload.get("newEncryptedKeys");
+        
+        // 1. Security Gate: Verify executing caller holds active administrative clearance
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM group_members gm JOIN prama_users u ON gm.user_id = u.id " +
+            "WHERE gm.group_id = ?::uuid AND (u.username = ? OR u.email = ?) AND gm.is_admin = true",
+            Integer.class, groupId, callerIdentity, callerIdentity
+        );
+            
+        if (count == null || count == 0) {
+            System.err.println("❌ [SECURITY RETRACTION] Non-admin context denied access to eviction suite.");
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized: Administrative authorization required.");
+        }
+        
+        // 2. Purge the target member record
+        int removed = jdbcTemplate.update(
+            "DELETE FROM group_members WHERE group_id = ?::uuid AND user_id = ?::uuid",
+            groupId, kickedUserId
+        );
+        
+        if (removed == 0) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Target participant signature unmatched in room records.");
+        }
+        
+        // 3. Update rotated keys for remaining members
+        rotatedKeysMap.forEach((userId, newWrappedKey) -> {
+            jdbcTemplate.update(
+                "UPDATE group_members SET encrypted_group_key = ? WHERE group_id = ?::uuid AND user_id = ?::uuid",
+                newWrappedKey, groupId, userId
+            );
+        });
+        
+        // 4. Real-Time Sync Broadcast
+        Map<String, Object> evictionPacket = new HashMap<>();
+        evictionPacket.put("type", "MEMBER_KICKED");
+        evictionPacket.put("groupId", groupId);
+        evictionPacket.put("kickedUserId", kickedUserId);
+        evictionPacket.put("rotatedKeys", rotatedKeysMap);
+        
+        messagingTemplate.convertAndSend("/topic/group." + groupId, evictionPacket);
+        return ResponseEntity.ok().body(Map.of("success", true, "evictedUserId", kickedUserId));
     }
 
     /**
