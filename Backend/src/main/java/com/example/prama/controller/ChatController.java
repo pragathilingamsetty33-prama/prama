@@ -92,7 +92,6 @@ public class ChatController {
             if (!principalName.equals(pMsg.getSender().getEmail()) && 
                 !principalName.equals(pMsg.getSender().getId().toString()) && 
                 !principalName.equals(pMsg.getSender().getUsername())) {
-                System.err.println("❌ Auth claim mismatch. Principal: " + principalName + " vs Sender Username: " + pMsg.getSender().getUsername());
                 return ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).body("Access claims rejected.");
             }
             
@@ -245,7 +244,6 @@ public class ChatController {
             // 🔥 GHOST PROTOCOL SILENT-DROP GATEWAY
             java.util.Optional<com.example.prama.entity.Friendship> activeLink = friendshipRepository.findByUserIds(sender.getId(), recipient.getId());
             if (activeLink.isEmpty()) {
-                System.out.println("🤫 [GHOST] Intercepted and dropped message from " + sender.getUsername() + " to " + recipient.getUsername());
                 return; 
             }
 
@@ -319,7 +317,7 @@ public class ChatController {
                 }
             }
         } catch (Exception ex) {
-            System.err.println("❌ [BACKEND ROUTER CRASH] Broadcast mapping failed");
+            System.err.println("Broadcast mapping failed");
             ex.printStackTrace();
         }
 

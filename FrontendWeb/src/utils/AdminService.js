@@ -10,7 +10,9 @@ class AdminService {
    * Helper to get auth headers from localStorage or context.
    */
   getHeaders() {
-    const token = localStorage.getItem('token');
+    const storedUser = localStorage.getItem('prama_auth_user');
+    const user = storedUser ? JSON.parse(storedUser) : null;
+    const token = user?.accessToken;
     return {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json'

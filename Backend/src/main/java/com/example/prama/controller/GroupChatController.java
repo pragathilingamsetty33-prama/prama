@@ -58,7 +58,6 @@ public class GroupChatController {
         );
             
         if (count == null || count == 0) {
-            System.err.println("❌ [SECURITY VIOLATION] Non-admin principal identity attempted to invoke promotion pipeline.");
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Access denied: Admin authorization required.");
         }
         
@@ -102,7 +101,6 @@ public class GroupChatController {
         );
             
         if (adminCount == null || adminCount == 0) {
-            System.err.println("❌ [SECURITY RETRACTION] Non-admin context denied access to membership modification tools.");
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized operation: Admin role confirmation required.");
         }
         
@@ -165,7 +163,6 @@ public class GroupChatController {
         );
             
         if (count == null || count == 0) {
-            System.err.println("❌ [SECURITY RETRACTION] Non-admin context denied access to eviction suite.");
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized: Administrative authorization required.");
         }
         
@@ -286,15 +283,10 @@ public class GroupChatController {
             @PathVariable String groupId, 
             @RequestBody(required = false) GroupUpdatePayload payload, 
             Principal principal) {
-            
-        System.out.println("🦅 [DEVOPS HTTP 200] Request successfully penetrated the controller for Group: " + groupId);
         
         if (payload == null) {
-            System.err.println("❌ [DEVOPS ERROR] Payload is completely null!");
             return ResponseEntity.badRequest().body("Empty payload.");
         }
-        
-        System.out.println("📦 Payload Parsed -> New Name: [" + payload.getName() + "], Avatar Attached: [" + (payload.getAvatar() != null) + "]");
         
         String callerIdentity = principal.getName();
         
@@ -306,14 +298,12 @@ public class GroupChatController {
         );
             
         if (count == null || count == 0) {
-            System.err.println("❌ [SECURITY] Unauthorized modification attempt by: " + callerIdentity);
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Unauthorized: Administrative authorization required to alter group metadata.");
         }
         
         // 2. Mutate the group record metadata
         if (payload.getName() != null && !payload.getName().trim().isEmpty()) {
             jdbcTemplate.update("UPDATE groups SET name = ? WHERE group_id = ?::uuid", payload.getName().trim(), groupId);
-            System.out.println("✅ Group name updated in memory.");
         }
         
         if (payload.getAvatar() != null) {
@@ -323,14 +313,12 @@ public class GroupChatController {
             } catch (Exception e) { /* Column might already exist */ }
             
             jdbcTemplate.update("UPDATE groups SET group_avatar = ? WHERE group_id = ?::uuid", payload.getAvatar(), groupId);
-            System.out.println("✅ Group avatar updated in memory.");
         }
         
         // 3. Fetch final state for broadcast
         Map<String, Object> groupData = jdbcTemplate.queryForMap("SELECT name FROM groups WHERE group_id = ?::uuid", groupId);
         
         // 4. Real-Time Sync Broadcast
-        System.out.println("🏆 Database committed. Broadcasting lightweight STOMP sync packet...");
         Map<String, Object> updatePacket = new HashMap<>();
         updatePacket.put("type", "GROUP_UPDATED");
         updatePacket.put("groupId", groupId);

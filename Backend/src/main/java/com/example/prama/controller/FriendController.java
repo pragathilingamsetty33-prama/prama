@@ -83,7 +83,6 @@ public class FriendController {
         // Expunge record so incoming messages fail the relationship contract check
         friendshipRepository.findByUserIds(currentUser.getId(), friendId).ifPresent(friendshipRepository::delete);
         
-        System.out.println("🤫 [GHOST PROTOCOL] Friendship severed safely by: " + currentUser.getUsername());
         return ResponseEntity.ok(java.util.Map.of("success", true));
     }
 }

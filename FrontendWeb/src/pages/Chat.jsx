@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import SockJS from 'sockjs-client';
 import { Stomp } from '@stomp/stompjs';
-import { Search, Send, ShieldCheck, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward } from 'lucide-react';
+import { Search, Send, ShieldCheck, Shield, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward } from 'lucide-react';
 import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES } from '../utils/crypto';
 import { KeyCache } from '../utils/KeyCache';
 import forge from 'node-forge';
@@ -212,6 +212,16 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
 
 const Chat = () => {
     const { user, setUser: setCurrentUser, keys, logout, apiFetch, loading } = useAuth();
+    // 🧪 SURGICAL JWT CLAIMS INSPECTOR
+    if (user?.accessToken) {
+        try {
+            const base64Url = user.accessToken.split('.')[1];
+            const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+            const parsedPayload = JSON.parse(window.atob(base64));
+        } catch (e) {
+            console.error("🛡️ Diagnostic JWT Parse Failure:", e);
+        }
+    }
     const navigate = useNavigate();
     const stompClient = useRef(null);
     const keysRef = useRef(keys);
@@ -547,7 +557,6 @@ const Chat = () => {
 
             const permission = await Notification.requestPermission();
             if (permission === "granted") {
-                console.log("🔔 Notification permission granted.");
                 
                 // 2. Pass the validated messaging token container instance explicitly
                 const token = await getToken(messaging, {
@@ -555,7 +564,6 @@ const Chat = () => {
                 });
                 
                 if (token) {
-                    console.log("✅ FCM Registration Token secured successfully.");
                     // Sync token with backend if authenticated
                     if (user?.accessToken) {
                         await fetch(`${import.meta.env.VITE_API_URL}/api/v1/users/fcm-token`, {
@@ -664,7 +672,6 @@ const Chat = () => {
             
             navigator.serviceWorker.register(swUrl)
                 .then((registration) => {
-                    console.log("✅ Service Worker registered with dynamic parameters.");
                 })
                 .catch((err) => {
                     console.error('Service Worker registration failed:', err);
@@ -1570,7 +1577,6 @@ return; // Sever the global status update for group messages
                     'Authorization': `Bearer ${user.accessToken}`
                 }
             });
-            console.log(`✅ [ADMIN] Promotion request for ${targetUserId} submitted.`);
         } catch (err) {
             console.error("❌ Exception captured during outbound role promotion call mapping:", err);
             alert("Failed to promote user. Ensure you are a group admin.");
@@ -1768,20 +1774,58 @@ return; // Sever the global status update for group messages
                         <div style={{ wordBreak: 'break-all', fontSize: '14px', fontWeight: 'bold' }}>{user?.username || user?.email}</div>
                     </div>
 
-                    {/* 📊 PROFILE SETTINGS GEAR ICON UTILITY */}
-                    <button 
-                        onClick={() => {
-                            setProfileFormData({ username: user?.username || '', email: user?.email || '', currentPassword: '', newPassword: '' });
-                            setShowProfileSettings(true);
-                        }}
-                        className="absolute top-3 right-3 text-gray-500 hover:text-emerald-400 transition-colors p-1 rounded hover:bg-gray-800/40"
-                        title="Account Settings"
-                        style={{ background: 'none', border: 'none', cursor: 'pointer' }}
-                    >
-                        {/* Dependency-Free Settings Gear SVG */}
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    </button>
+                    {/* 📊 ACTION BUTTONS GROUP */}
+                    <div style={{ position: 'absolute', top: '12px', right: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {/* 📊 PHASE 11: PROGRAMMATIC ADMINISTRATIVE ENTRY GATE */}
+                        {(() => {
+                            // Attempt to parse role directly from the JWT token claims if available
+                            let tokenRole = null;
+                            if (user?.accessToken) {
+                                try {
+                                    const base64Url = user.accessToken.split('.')[1];
+                                    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                                    const payload = JSON.parse(window.atob(base64));
+                                    tokenRole = payload.role || payload.roles || (payload.authorities ? payload.authorities[0] : null);
+                                } catch (e) {
+                                    console.error("🛡️ JWT Parsing Error:", e);
+                                }
+                            }
+
+                            // 2. Evaluate access STRICTLY based on dynamic roles. Zero hardcoded strings.
+                            const isAdmin = user?.role === 'ADMIN' || 
+                                            user?.role === 'ROLE_ADMIN' || 
+                                            tokenRole === 'ADMIN' || 
+                                            tokenRole === 'ROLE_ADMIN';
+
+                            if (!isAdmin) return null;
+
+                            return (
+                                <button 
+                                    onClick={() => navigate('/admin')} 
+                                    className="text-emerald-400 hover:text-emerald-300 transition-colors duration-200 p-1 rounded hover:bg-gray-800/40"
+                                    title="Admin Dashboard"
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                >
+                                    <Shield size={16} strokeWidth={2.5} />
+                                </button>
+                            );
+                        })()}
+
+                        {/* 📊 PROFILE SETTINGS GEAR ICON UTILITY */}
+                        <button 
+                            onClick={() => {
+                                setProfileFormData({ username: user?.username || '', email: user?.email || '', currentPassword: '', newPassword: '' });
+                                setShowProfileSettings(true);
+                            }}
+                            className="text-gray-500 hover:text-emerald-400 transition-colors p-1 rounded hover:bg-gray-800/40"
+                            title="Account Settings"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1-2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        </button>
+                    </div>
                 </div>
+
 
 
                 {/* Tabs */}

@@ -18,10 +18,9 @@ const firebaseConfig = {
 
 // 📊 Integrity Tripwire: Ensure critical keys are present before initialization
 if (!firebaseConfig.projectId || !firebaseConfig.apiKey || !firebaseConfig.appId) {
-    console.error("❌ [firebase-messaging-sw.js] CRITICAL ERROR: Missing configuration parameters in query string!");
-    console.log("👉 Captured Config State:", JSON.stringify(firebaseConfig));
+    console.error("CRITICAL ERROR: Missing configuration parameters in query string!");
 } else {
-    console.log("✅ [firebase-messaging-sw.js] Configuration extracted successfully. Project:", firebaseConfig.projectId);
+    console.log("Configuration extracted successfully. Project:", firebaseConfig.projectId);
 }
 
 try {
@@ -41,7 +40,6 @@ try {
 
       self.registration.showNotification(notificationTitle, notificationOptions);
     });
-    console.log("🚀 [firebase-messaging-sw.js] Messaging engine armed and background listeners active.");
 } catch (err) {
-    console.error("❌ [firebase-messaging-sw.js] Background initialization failed:", err.message);
+    console.error("Background initialization failed:", err.message);
 }

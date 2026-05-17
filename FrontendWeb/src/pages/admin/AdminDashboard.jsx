@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import AdminService from '../../utils/AdminService';
-import { Activity, Users, Database, Server, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Activity, Users, Database, Server, CheckCircle2, AlertCircle, Shield } from 'lucide-react';
 
 /**
  * AdminDashboard displays high-level system telemetry and metrics.
