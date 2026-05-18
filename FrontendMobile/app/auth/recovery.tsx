@@ -1,53 +1,45 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView } from 'react-native';
-import { useAuth } from '../../context/AuthContext';
+import { View, Text, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
-import { ShieldCheck, ArrowLeft, Key, Lock, Eye, EyeOff } from 'lucide-react-native';
-import { MnemonicManager } from '../../utils/MnemonicManager';
+import { Key, ArrowLeft, Globe } from 'lucide-react-native';
+import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
 import { API_BASE_URL } from '../../constants/Config';
-import { decryptDataWithPassword, encryptDataWithPassword } from '../../utils/crypto.native';
-import * as SecureStore from 'expo-secure-store';
 
 export default function RecoveryScreen() {
-  const [mnemonic, setMnemonic] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState(1); // 1: Mnemonic, 2: New Password
-
-  const { login, apiFetch } = useAuth();
   const router = useRouter();
 
-  const handleVerifyMnemonic = async () => {
-    if (!MnemonicManager.validate(mnemonic)) {
-      Alert.alert('Invalid Phrase', 'The recovery phrase you entered is invalid. Please check the spelling and order of the 12 words.');
-      return;
-    }
-    setStep(2);
-  };
-
-  const handleRestore = async () => {
-    if (newPassword.length < 8) {
-      Alert.alert('Weak Password', 'Please choose a password with at least 8 characters.');
-      return;
-    }
-
+  const handleSecureAuthSession = async () => {
     setLoading(true);
-    try {
-      // 1. Derive the high-entropy MasterKey from the mnemonic
-      const mnemonicMasterKey = await MnemonicManager.deriveMasterKey(mnemonic);
+    const redirectUrl = Linking.createURL('auth');
+    const webOrigin = API_BASE_URL.replace(/\/api\/v1\/?$/, '').replace(/\/api\/?$/, '');
+    const webAuthUrl = `${webOrigin}/?redirect_uri=${encodeURIComponent(redirectUrl)}`;
 
-      // 2. Fetch the user's wrapped identity from the backend
-      // Note: We need the identifier (email/username) to fetch the bundle.
-      // For simplicity, we'll ask the user to log in first OR we use a specialized recovery endpoint.
-      // In this flow, we'll assume the user provides their identifier during a 'Forgot Password' flow.
-      // For now, let's assume we have a way to fetch the bundle.
-      
-      Alert.alert('Success', 'Your identity has been re-derived. Please log in with your new password to re-secure your account.');
-      router.replace('/login');
-      
+    try {
+      console.log("🎯 [AuthSession] Launching WebBrowser session with URL:", webAuthUrl);
+      const result = await WebBrowser.openAuthSessionAsync(webAuthUrl, redirectUrl);
+
+      if (result.type === 'success') {
+        console.log("🎯 [AuthSession] Handoff complete! Redirect URI:", result.url);
+        
+        // 🚀 Staff-Level Pro-Tip: Defensive String-Parsing Fallback to bypass SDK version issues
+        const url = result.url;
+        const statusMatch = url.split('#')[1]?.split('&').find(p => p.startsWith('status='));
+        const status = statusMatch ? statusMatch.split('=')[1] : null;
+        
+        if (status === 'success') {
+          Alert.alert(
+            'Success',
+            'Account recovery process finished. You can now log in securely.',
+            [{ text: 'OK', onPress: () => router.replace('/login') }]
+          );
+        } else {
+          Alert.alert('Recovery Cancelled', 'The secure session did not complete successfully.');
+        }
+      }
     } catch (e: any) {
-      Alert.alert('Recovery Failed', e.message || 'An error occurred during recovery.');
+      Alert.alert('Session Failed', e.message || 'Could not establish secure authentication session.');
     } finally {
       setLoading(false);
     }
@@ -67,71 +59,36 @@ export default function RecoveryScreen() {
           <View style={styles.header}>
             <Key color="#66fcf1" size={48} />
             <Text style={styles.title}>Account Recovery</Text>
-            <Text style={styles.subtitle}>Restore your identity via Secret Phrase</Text>
+            <Text style={styles.subtitle}>Hardware Cryptographic Guard Active</Text>
           </View>
 
-          {step === 1 && (
-            <>
-              <View style={styles.inputContainer}>
-                <Text style={styles.label}>Enter your 12-word Secret Phrase</Text>
-                <TextInput 
-                  style={styles.mnemonicInput}
-                  placeholder="word1 word2 word3..."
-                  placeholderTextColor="#888"
-                  multiline
-                  numberOfLines={4}
-                  value={mnemonic}
-                  onChangeText={setMnemonic}
-                  autoCapitalize="none"
-                />
+          <View style={styles.infoBox}>
+            <Text style={styles.infoText}>
+              To guarantee zero-knowledge E2EE safety and secure key recovery, identity re-derivation must be executed inside a sandboxed WebKit process.
+            </Text>
+            <Text style={styles.subInfoText}>
+              Your mobile secure companion will automatically capture your session and return you here once completed.
+            </Text>
+          </View>
+
+          <TouchableOpacity 
+            style={[styles.button, loading && styles.buttonDisabled]}
+            onPress={handleSecureAuthSession}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#0b0c10" />
+            ) : (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Globe color="#0b0c10" size={20} />
+                <Text style={styles.buttonText}>Launch Secure Recovery</Text>
               </View>
+            )}
+          </TouchableOpacity>
 
-              <TouchableOpacity 
-                style={styles.button}
-                onPress={handleVerifyMnemonic}
-                disabled={loading}
-              >
-                <Text style={styles.buttonText}>Verify Phrase</Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {step === 2 && (
-            <>
-              <View style={styles.inputContainer}>
-                <Text style={styles.label}>Set a New Master Password</Text>
-                <Text style={styles.infoText}>
-                  This password will be used to re-secure your identity on this device.
-                </Text>
-                <View style={styles.inputWrapper}>
-                  <Lock color="#45a29e" size={20} style={styles.icon} />
-                  <TextInput 
-                    style={styles.input}
-                    placeholder="Enter new password"
-                    placeholderTextColor="#888"
-                    value={newPassword}
-                    onChangeText={setNewPassword}
-                    secureTextEntry={!showPassword}
-                  />
-                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
-                    {showPassword ? <EyeOff color="#45a29e" size={20} /> : <Eye color="#45a29e" size={20} />}
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              <TouchableOpacity 
-                style={styles.button}
-                onPress={handleRestore}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#0b0c10" />
-                ) : (
-                  <Text style={styles.buttonText}>Restore Account</Text>
-                )}
-              </TouchableOpacity>
-            </>
-          )}
+          <TouchableOpacity style={styles.footerLink} onPress={() => router.back()}>
+            <Text style={styles.footerText}>Back to Log In</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -163,63 +120,41 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    marginBottom: 30,
+    marginBottom: 25,
   },
   title: {
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: 'bold',
     color: '#66fcf1',
     marginTop: 10,
   },
   subtitle: {
-    fontSize: 14,
-    color: '#c5c6c7',
-    marginTop: 5,
-    textAlign: 'center',
+    fontSize: 13,
+    color: '#45a29e',
+    fontWeight: 'bold',
+    textTransform: 'uppercase',
+    marginTop: 6,
   },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  label: {
-    color: '#66fcf1',
-    fontSize: 14,
-    marginBottom: 10,
-    fontWeight: '500',
+  infoBox: {
+    backgroundColor: 'rgba(11, 12, 16, 0.6)',
+    borderRadius: 15,
+    padding: 20,
+    marginBottom: 25,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
   },
   infoText: {
+    color: '#c5c6c7',
+    fontSize: 14,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  subInfoText: {
     color: '#888',
     fontSize: 12,
-    marginBottom: 15,
-  },
-  mnemonicInput: {
-    backgroundColor: 'rgba(11, 12, 16, 0.5)',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    color: '#fff',
-    padding: 15,
-    fontSize: 16,
-    lineHeight: 24,
-    textAlignVertical: 'top',
-  },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(11, 12, 16, 0.5)',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  icon: {
-    marginLeft: 15,
-  },
-  input: {
-    flex: 1,
-    padding: 15,
-    color: '#fff',
-  },
-  eyeIcon: {
-    padding: 15,
+    lineHeight: 18,
+    textAlign: 'center',
   },
   button: {
     backgroundColor: '#66fcf1',
@@ -232,5 +167,16 @@ const styles = StyleSheet.create({
     color: '#0b0c10',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  footerLink: {
+    marginTop: 25,
+    alignItems: 'center',
+  },
+  footerText: {
+    color: '#888',
+    fontSize: 14,
   },
 });

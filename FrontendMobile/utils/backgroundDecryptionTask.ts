@@ -1,13 +1,13 @@
 import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
-import { DecryptionWorker } from './utils/DecryptionWorker';
+import { DecryptionWorker } from './DecryptionWorker';
 
 const GHOST_NOTIFICATION_TASK = 'GHOST_NOTIFICATION_TASK';
 
 /**
  * Register the background task for handling data-only FCM messages.
  */
-TaskManager.defineTask(GHOST_NOTIFICATION_TASK, async ({ data, error }) => {
+TaskManager.defineTask(GHOST_NOTIFICATION_TASK, async ({ data, error }: { data: any, error: any }) => {
   if (error) {
     console.error('Background task error:', error);
     return;
@@ -41,6 +41,8 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
   }),
 });
 

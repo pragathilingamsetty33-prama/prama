@@ -56,3 +56,5 @@ nbdist/
 
 # Specific Prama files to ignore
 cors.json
+search_results.txt
+prama_dashboard_mockup.png

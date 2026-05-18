@@ -18,4 +18,5 @@ public class FriendDTO {
     private String email;
     private String alias;
     private String avatar;
+    private Long lastActiveTimestamp;
 }

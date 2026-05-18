@@ -11,9 +11,9 @@ export default function TabLayout() {
       screenOptions={{
         tabBarActiveTintColor: '#66fcf1',
         tabBarInactiveTintColor: '#45a29e',
+        // 🚀 FIX: Turn off and completely hide the bottom navigation bar UI layout frame
         tabBarStyle: {
-          backgroundColor: '#0b0c10',
-          borderTopColor: 'rgba(102, 252, 241, 0.1)',
+          display: 'none',
         },
         headerShown: false,
       }}>
@@ -22,13 +22,6 @@ export default function TabLayout() {
         options={{
           title: 'Chats',
           tabBarIcon: ({ color }) => <MessageSquare size={24} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="explore"
-        options={{
-          title: 'Add Friends',
-          tabBarIcon: ({ color }) => <UserPlus size={24} color={color} />,
         }}
       />
     </Tabs>

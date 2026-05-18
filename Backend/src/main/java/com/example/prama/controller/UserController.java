@@ -146,6 +146,11 @@ public class UserController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Current password validation failed.");
         }
         user.setPassword(passwordEncoder.encode(payload.get("newPassword")));
+        
+        if (payload.containsKey("encryptedKeyBundle") && !payload.get("encryptedKeyBundle").trim().isEmpty()) {
+            user.setEncryptedKeyBundle(payload.get("encryptedKeyBundle"));
+        }
+        
         userRepository.save(user);
         return ResponseEntity.ok(Map.of("success", true, "message", "Password rotated securely."));
     }

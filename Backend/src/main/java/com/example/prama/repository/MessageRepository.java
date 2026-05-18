@@ -21,4 +21,16 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
     @org.springframework.transaction.annotation.Transactional
     @Query("UPDATE Message m SET m.status = 'READ' WHERE m.sender.id = :friendId AND m.recipient.id = :myId AND m.status <> 'READ'")
     void markAsRead(@Param("friendId") UUID friendId, @Param("myId") UUID myId);
+
+    // 🚀 Sent Message Aggregator (No parameter placeholders in GROUP BY)
+    @Query("SELECT m.recipient.id, MAX(m.timestamp) FROM Message m " +
+           "WHERE m.sender.id = :myId AND m.recipient.id IN :friendIds " +
+           "GROUP BY m.recipient.id")
+    List<Object[]> findMaxSentTimestamps(@Param("myId") UUID myId, @Param("friendIds") List<UUID> friendIds);
+
+    // 🚀 Received Message Aggregator (No parameter placeholders in GROUP BY)
+    @Query("SELECT m.sender.id, MAX(m.timestamp) FROM Message m " +
+           "WHERE m.recipient.id = :myId AND m.sender.id IN :friendIds " +
+           "GROUP BY m.sender.id")
+    List<Object[]> findMaxReceivedTimestamps(@Param("myId") UUID myId, @Param("friendIds") List<UUID> friendIds);
 }

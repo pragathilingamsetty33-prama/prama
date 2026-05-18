@@ -40,6 +40,16 @@ export const AuthProvider = ({ children }) => {
                             body: JSON.stringify({ publicKey: parsedKeys.publicKey })
                         }).catch(console.error);
 
+                        // GUARANTEE WEB KEY BACKUP: Immediate fetch POST to back up locally stored RSA key pair to key-bundle
+                        fetch(`${API_BASE}/api/v1/users/key-bundle`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + parsedUser.accessToken,
+                            },
+                            body: JSON.stringify({ encryptedKeyBundle: storedEncryptedKeys })
+                        }).catch(console.error);
+
                         requestForToken(parsedUser.accessToken);
                     } catch (e) {
                         console.error('Session restore failed, forcing re-login:', e);

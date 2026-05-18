@@ -5,9 +5,11 @@ import com.example.prama.entity.Friendship;
 import com.example.prama.entity.User;
 import com.example.prama.repository.FriendshipRepository;
 import com.example.prama.repository.UserRepository;
+import com.example.prama.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.time.Instant;
 
 import java.util.List;
 import java.util.UUID;
@@ -20,6 +22,7 @@ public class FriendService {
 
     private final FriendshipRepository friendshipRepository;
     private final UserRepository userRepository;
+    private final MessageRepository messageRepository;
 
     public void sendFriendRequest(String senderUsername, String receiverUsername) {
         User sender = userRepository.findByUsername(senderUsername)
@@ -78,7 +81,52 @@ public class FriendService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new IllegalArgumentException("User not found"));
 
-        return friendshipRepository.findAcceptedFriendsForUser(user).stream()
+        List<Friendship> friendships = friendshipRepository.findAcceptedFriendsForUser(user);
+        if (friendships.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+
+        // 1. Collect friend user IDs for the batch query
+        List<UUID> friendIds = friendships.stream()
+                .map(f -> f.getSender().getId().equals(user.getId()) ? f.getReceiver().getId() : f.getSender().getId())
+                .collect(Collectors.toList());
+
+        // 2. Initialize fast lookup dictionary
+        java.util.Map<UUID, Long> timestampMap = new java.util.HashMap<>();
+        
+        // 2a. Process messages I generated
+        List<Object[]> sentData = messageRepository.findMaxSentTimestamps(user.getId(), friendIds);
+        for (Object[] row : sentData) {
+            Object friendVal = row[0];
+            Object timeVal = row[1];
+            
+            UUID friendId = (friendVal instanceof UUID) ? (UUID) friendVal : (friendVal instanceof String) ? UUID.fromString((String) friendVal) : null;
+            Long epochMilli = (timeVal instanceof java.time.Instant) ? ((java.time.Instant) timeVal).toEpochMilli() : (timeVal instanceof java.sql.Timestamp) ? ((java.sql.Timestamp) timeVal).getTime() : (timeVal instanceof java.util.Date) ? ((java.util.Date) timeVal).getTime() : null;
+            
+            if (friendId != null && epochMilli != null) {
+                timestampMap.put(friendId, epochMilli);
+            }
+        }
+        
+        // 2b. Process incoming messages from my contacts, mapping the maximum boundaries
+        List<Object[]> receivedData = messageRepository.findMaxReceivedTimestamps(user.getId(), friendIds);
+        for (Object[] row : receivedData) {
+            Object friendVal = row[0];
+            Object timeVal = row[1];
+            
+            UUID friendId = (friendVal instanceof UUID) ? (UUID) friendVal : (friendVal instanceof String) ? UUID.fromString((String) friendVal) : null;
+            Long epochMilli = (timeVal instanceof java.time.Instant) ? ((java.time.Instant) timeVal).toEpochMilli() : (timeVal instanceof java.sql.Timestamp) ? ((java.sql.Timestamp) timeVal).getTime() : (timeVal instanceof java.util.Date) ? ((java.util.Date) timeVal).getTime() : null;
+            
+            if (friendId != null && epochMilli != null) {
+                Long existing = timestampMap.get(friendId);
+                if (existing == null || epochMilli > existing) {
+                    timestampMap.put(friendId, epochMilli);
+                }
+            }
+        }
+
+        // 3. Zip DTOs with timestamps
+        return friendships.stream()
                 .map(f -> {
                     User friend = f.getSender().getId().equals(user.getId()) ? f.getReceiver() : f.getSender();
                     return FriendDTO.builder()
@@ -88,6 +136,7 @@ public class FriendService {
                             .email(friend.getEmail())
                             .alias(f.getSender().getId().equals(user.getId()) ? f.getReceiverAlias() : f.getSenderAlias())
                             .avatar(friend.getAvatar())
+                            .lastActiveTimestamp(timestampMap.getOrDefault(friend.getId(), 0L))
                             .build();
                 })
                 .collect(Collectors.toList());

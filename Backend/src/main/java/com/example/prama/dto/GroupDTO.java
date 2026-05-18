@@ -16,4 +16,5 @@ public class GroupDTO {
     private String name;
     private String groupAvatar;
     private Long memberCount;
+    private Long lastActiveTimestamp;
 }

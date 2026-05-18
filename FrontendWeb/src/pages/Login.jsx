@@ -25,7 +25,16 @@ const Login = () => {
         try {
             if (isLogin) {
                 // Argon2 can take 1-2 seconds, so we show a status update
-                await login(email, password, (msg) => setStatus(msg)); 
+                const userData = await login(email, password, (msg) => setStatus(msg)); 
+                
+                // 🚀 Phase 4.1: Secure Redirect Handoff with Hash Fragment Isolation (#)
+                const queryParams = new URLSearchParams(window.location.search);
+                const redirectUri = queryParams.get('redirect_uri');
+                if (redirectUri) {
+                    window.location.replace(`${redirectUri}#status=success&token=${userData.accessToken}`);
+                    return;
+                }
+
                 navigate('/chat');
             } else {
                 setStatus('Generating keys...');

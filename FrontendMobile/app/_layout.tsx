@@ -5,6 +5,8 @@ import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth, AuthProvider } from '../context/AuthContext';
+import { ToastProvider } from '../context/ToastContext';
+import { WebSocketProvider } from '../context/WebSocketContext';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -42,6 +44,7 @@ function RootLayoutContent() {
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen name="chat/[id]" options={{ title: 'Chat' }} />
+        <Stack.Screen name="admin/telemetry" options={{ headerShown: false, presentation: 'modal' }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>
@@ -51,7 +54,11 @@ function RootLayoutContent() {
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <RootLayoutContent />
+      <WebSocketProvider>
+        <ToastProvider>
+          <RootLayoutContent />
+        </ToastProvider>
+      </WebSocketProvider>
     </AuthProvider>
   );
 }

@@ -1,3 +1,4 @@
+import 'react-native-get-random-values';
 import { NativeModules, Platform } from 'react-native';
 
 /**
@@ -116,7 +117,7 @@ export async function decryptFile(
 export function generateAES256KeyBase64(): string {
   const raw = new Uint8Array(32);
   // React Native exposes getRandomValues via react-native-get-random-values polyfill
-  (globalThis.crypto ?? require('crypto')).getRandomValues(raw);
+  globalThis.crypto.getRandomValues(raw);
   return Buffer.from(raw).toString('base64');
 }
 

@@ -31,18 +31,23 @@ public class GroupController {
         User currentUser = (User) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
 
         String sql = "SELECT g.group_id, g.name, g.group_avatar, " +
-                     "(SELECT count(*) FROM group_members WHERE group_id = g.group_id) as member_count " +
+                     "(SELECT count(*) FROM group_members WHERE group_id = g.group_id) as member_count, " +
+                     "(SELECT MAX(timestamp) FROM group_messages WHERE group_id = g.group_id) as last_active " +
                      "FROM groups g " +
                      "JOIN group_members gm ON g.group_id = gm.group_id " +
                      "WHERE gm.user_id = ?";
 
-        List<com.example.prama.dto.GroupDTO> groups = jdbcTemplate.query(sql, (rs, rowNum) -> 
-            com.example.prama.dto.GroupDTO.builder()
+        List<com.example.prama.dto.GroupDTO> groups = jdbcTemplate.query(sql, (rs, rowNum) -> {
+            java.sql.Timestamp lastActive = rs.getTimestamp("last_active");
+            Long lastActiveMilli = lastActive != null ? lastActive.getTime() : 0L;
+            return com.example.prama.dto.GroupDTO.builder()
                 .groupId(UUID.fromString(rs.getString("group_id")))
                 .name(rs.getString("name"))
                 .groupAvatar(rs.getString("group_avatar"))
                 .memberCount(rs.getLong("member_count"))
-                .build(), 
+                .lastActiveTimestamp(lastActiveMilli)
+                .build();
+        },
             currentUser.getId()
         );
         return ResponseEntity.ok(groups);

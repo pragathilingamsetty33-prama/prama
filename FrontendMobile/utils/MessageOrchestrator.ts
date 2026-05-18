@@ -15,8 +15,8 @@ import { API_BASE_URL } from '../constants/Config';
 
 export interface SecureMessagePacket {
   id?: string;
-  senderId: string;
-  recipientId: string;
+  senderId?: string;
+  recipientId?: string;
   encryptedAESKey: string;      // RSA-encrypted with recipient's public key
   senderEncryptedAESKey?: string; // RSA-encrypted with sender's public key (for multi-device/history)
   encryptedMessage: string;     // The actual message or file metadata

@@ -6,6 +6,7 @@ import { generateRSAKeyPair, encryptDataWithPassword, decryptDataWithPassword } 
  * It ensures the Private Key is always wrapped with the MasterKey before storage.
  */
 
+// SECURE KEY NAMESPACES: Must be 100% identical to string keys used in AuthContext.tsx
 const SECURE_STORE_KEYS = {
   WRAPPED_PRIVATE_KEY: 'prama_wrapped_private_key',
   PUBLIC_KEY: 'prama_public_key',

@@ -12,7 +12,7 @@ if (typeof global.Buffer === 'undefined') {
  */
 export const generateRSAKeyPair = async (): Promise<{ publicKey: string; privateKey: string }> => {
   return new Promise((resolve, reject) => {
-    forge.pki.rsa.generateKeyPair({ bits: 2048, workers: -1 }, (err, keypair) => {
+    forge.pki.rsa.generateKeyPair({ bits: 2048, workers: -1 }, (err: any, keypair: any) => {
       if (err) return reject(err);
 
       const publicKeyPem = forge.pki.publicKeyToPem(keypair.publicKey);

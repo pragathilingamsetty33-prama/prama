@@ -8,11 +8,11 @@ export class GroupAdminService {
    * Invites a new member to the group.
    * Logic: Allowed if requester is admin OR members_can_add is enabled.
    */
-  static async addMember(groupId: string, userId: string, apiFetch: any): Promise<void> {
-    const response = await apiFetch(`${API_BASE_URL}/api/v1/groups/${groupId}/members`, {
+  static async addMember(groupId: string, friendId: string, encryptedGroupKey: string, apiFetch: any): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/api/v1/groups/${groupId}/addMember`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ friendId, encryptedGroupKey }),
     });
     if (!response.ok) throw new Error(await response.text());
   }
@@ -21,9 +21,24 @@ export class GroupAdminService {
    * Removes a member from the group.
    * Logic: Strictly Admin-only.
    */
-  static async removeMember(groupId: string, userId: string, apiFetch: any): Promise<void> {
-    const response = await apiFetch(`${API_BASE_URL}/api/v1/groups/${groupId}/members/${userId}`, {
-      method: 'DELETE',
+  static async removeMember(groupId: string, kickedUserId: string, newEncryptedKeys: Record<string, string>, apiFetch: any): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/api/v1/groups/${groupId}/removeMember`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kickedUserId, newEncryptedKeys }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+  }
+
+  /**
+   * Voluntarily exits a group and rotates the keys for the remaining members.
+   * Logic: Triggers dissolution if no admins remain.
+   */
+  static async exitGroup(groupId: string, newEncryptedKeys: Record<string, string>, apiFetch: any): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/api/v1/groups/${groupId}/exit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newEncryptedKeys }),
     });
     if (!response.ok) throw new Error(await response.text());
   }
