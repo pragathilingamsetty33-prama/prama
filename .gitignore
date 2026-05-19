@@ -58,3 +58,4 @@ nbdist/
 cors.json
 search_results.txt
 prama_dashboard_mockup.png
+deploy.ps1
