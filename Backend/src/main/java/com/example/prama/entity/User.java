@@ -55,6 +55,10 @@ public class User implements UserDetails {
     @Column
     private String fcmToken;
 
+    @Column(nullable = false, columnDefinition = "integer default 1")
+    @Builder.Default
+    private int vaultVersion = 1;
+
     @Column(nullable = false)
     @Builder.Default
     private String role = "ROLE_USER";

@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { Stomp } from '@stomp/stompjs';
-import { Search, Send, ShieldCheck, Shield, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward } from 'lucide-react';
-import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES, deriveKeyFromPassword, encryptDataWithPassword } from '../utils/crypto';
+import { Search, Send, ShieldCheck, Shield, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward, Cloud } from 'lucide-react';
+import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES, deriveKeyFromPassword, encryptDataWithPassword, encryptChunkWithAESGCM, decryptChunkWithAESGCM, decryptGroupMessageMegolm, enqueueGroupDecryption } from '../utils/crypto';
+import { saveChunkToIndexedDB, getFileChunksFromIndexedDB, wipeFileChunksFromIndexedDB } from '../utils/storageVault';
 import { KeyCache } from '../utils/KeyCache';
 import forge from 'node-forge';
 import { messaging } from '../firebase';
@@ -66,9 +67,11 @@ const purgeSingleCachedFile = async (messageId) => {
 
 const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache, setAttachmentCache, onForward, decryptedFiles, setDecryptedFiles }) => {
     // Check if this file has been decrypted in the CURRENT session
+    const { vaultDb } = useAuth();
     const sessionUrl = decryptedFiles[messageId];
 
     const [isDecrypting, setIsDecrypting] = useState(false);
+    const [downloadProgress, setDownloadProgress] = useState(0);
     const [error, setError] = useState(null);
 
     const isImage = attachment.type?.startsWith('image/');
@@ -76,6 +79,7 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
 
     const handleDownloadAndDecrypt = async () => {
         setIsDecrypting(true);
+        setDownloadProgress(0);
         try {
             const storedUser = localStorage.getItem('prama_auth_user');
             const token = storedUser ? JSON.parse(storedUser).accessToken : null;
@@ -89,21 +93,173 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
                 headers: token ? { 'Authorization': 'Bearer ' + token } : {}
             });
             if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-            const encryptedFileObj = await res.json();
-            const fileAesKey = forge.util.decode64(attachment.fileAesKey);
-            const arrayBuffer = decryptFileWithAES(encryptedFileObj, fileAesKey);
+            
+            if (attachment.version === 2) {
+                // 🚀 DETERMINISTIC ROUTING: Raw binary stream standard with flat < 2MB V8 heap limit
+                const reader = res.body.getReader();
+                const fileAesKey = typeof attachment.fileAesKey === 'string'
+                    ? forge.util.decode64(attachment.fileAesKey)
+                    : attachment.fileAesKey;
 
-            const blob = new Blob([arrayBuffer], { type: attachment.type });
-            const url = URL.createObjectURL(blob);
+                let chunkIndex = 0;
+                const fileId = String(messageId);
 
-            // Save to SESSION state only (No localStorage for group privacy)
-            setDecryptedFiles(prev => ({ ...prev, [messageId]: url }));
+                // The encrypted chunk boundary: 5 MB plaintext (5242880) + 16-byte tag = 5242896 bytes
+                const ENCRYPTED_CHUNK_SIZE = 5 * 1024 * 1024 + 16;
+                const expectedFileSize = attachment.expectedFileSize || 0;
+                let bytesProcessed = 0;
 
-            // PROFESSIONAL CACHING: Save to persistent IndexedDB
-            await cacheFile(messageId, blob);
+                // 🚀 V2 AEAD PROTOCOL: Static Sliding Window Buffer to prevent GC Thrashing
+                // Allocate 15MB to safely buffer multiple incoming TCP frames without overflowing
+                const BUFFER_CAPACITY = 15 * 1024 * 1024;
+                const staticBuffer = new Uint8Array(BUFFER_CAPACITY);
+                let writeOffset = 0;
+                let readOffset = 0;
 
-            if (setAttachmentCache) {
-                setAttachmentCache(prev => ({ ...prev, [attachment.url]: url }));
+                const baseIv = (attachment.baseIv || attachment.iv) ? forge.util.decode64(attachment.baseIv || attachment.iv) : null;
+                const rawBaseIv = new Uint8Array(12);
+                if (baseIv) {
+                    for (let i = 0; i < 12; i++) rawBaseIv[i] = baseIv.charCodeAt(i);
+                }
+
+                // Import Key natively for V8 Performance
+                const rawKeyBytes = new Uint8Array(32);
+                for (let i = 0; i < 32; i++) rawKeyBytes[i] = fileAesKey.charCodeAt(i);
+                const cryptoKey = await window.crypto.subtle.importKey("raw", rawKeyBytes, "AES-GCM", false, ["decrypt"]);
+
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        
+                        if (value) {
+                            // Defensive check to ensure we don't overflow the 3MB static buffer
+                            if (writeOffset + value.byteLength > BUFFER_CAPACITY) {
+                                throw new Error("Static sliding window buffer overflow. Network burst exceeded capacity.");
+                            }
+                            
+                            // Zero-allocation memory write
+                            staticBuffer.set(value, writeOffset);
+                            writeOffset += value.byteLength;
+                        }
+
+                        // Process all complete 1 MB encrypted chunks available in our buffer
+                        while ((writeOffset - readOffset) >= ENCRYPTED_CHUNK_SIZE && !done) {
+                            
+                            // 🚀 V2 AEAD AAD Trap Fix: Predict the final chunk using expectedFileSize
+                            const isLastChunk = (bytesProcessed + (ENCRYPTED_CHUNK_SIZE - 16)) >= expectedFileSize;
+
+                            // Zero-allocation slice pointer
+                            const chunkBytes = staticBuffer.subarray(readOffset, readOffset + ENCRYPTED_CHUNK_SIZE);
+                            readOffset += ENCRYPTED_CHUNK_SIZE;
+                            bytesProcessed += (ENCRYPTED_CHUNK_SIZE - 16);
+
+                            // Deterministic IV
+                            const iv = new Uint8Array(12);
+                            iv.set(rawBaseIv);
+                            const dv = new DataView(iv.buffer);
+                            dv.setUint32(8, chunkIndex, false);
+
+                            const textEncoder = new TextEncoder();
+                            const aadPayload = JSON.stringify([attachment.messageId || fileId, chunkIndex, isLastChunk ? 0x01 : 0x00]);
+                            const aad = textEncoder.encode(aadPayload);
+
+                            const decryptedBuffer = await window.crypto.subtle.decrypt(
+                                { name: "AES-GCM", iv: iv, additionalData: aad },
+                                cryptoKey,
+                                chunkBytes
+                            );
+
+                            // Enforce Strict Sequential Awaiting to block I/O backpressure and retain flat RAM ceiling
+                            await saveChunkToIndexedDB(vaultDb, fileId, chunkIndex, new Uint8Array(decryptedBuffer));
+
+                            const percentage = Math.round((bytesProcessed / expectedFileSize) * 100);
+                            if (percentage % 5 === 0) setDownloadProgress(percentage);
+
+                            chunkIndex++;
+                        }
+
+                        // Sliding Window Shift: Move remaining unread bytes to the front using C++ memmove
+                        if (readOffset > 0 && writeOffset > readOffset) {
+                            const unreadBytes = writeOffset - readOffset;
+                            staticBuffer.copyWithin(0, readOffset, writeOffset);
+                            writeOffset = unreadBytes;
+                            readOffset = 0;
+                        } else if (readOffset === writeOffset) {
+                            writeOffset = 0;
+                            readOffset = 0;
+                        }
+
+                        if (done) {
+                            // EOF: The remaining bytes represent the final, smaller residual chunk
+                            if (writeOffset > 0) {
+                                const chunkBytes = staticBuffer.subarray(0, writeOffset);
+                                
+                                const iv = new Uint8Array(12);
+                                iv.set(rawBaseIv);
+                                const dv = new DataView(iv.buffer);
+                                dv.setUint32(8, chunkIndex, false);
+
+                                const textEncoder = new TextEncoder();
+                                const aadPayload = JSON.stringify([attachment.messageId || fileId, chunkIndex, 0x01]);
+                                const aad = textEncoder.encode(aadPayload);
+
+                                const decryptedBuffer = await window.crypto.subtle.decrypt(
+                                    { name: "AES-GCM", iv: iv, additionalData: aad },
+                                    cryptoKey,
+                                    chunkBytes
+                                );
+
+                                await saveChunkToIndexedDB(vaultDb, fileId, chunkIndex, new Uint8Array(decryptedBuffer));
+                            }
+                            break;
+                        }
+                    }
+
+                    // 1. Retrieve all stored chunk-blobs (Disk-Backed virtual pointers) in a single Bound Query
+                    const decryptedChunksArray = await getFileChunksFromIndexedDB(vaultDb, fileId);
+
+                    // 2. IMMEDIATE EVICTION: Vaporize IndexedDB records. The Blob holds its own reference.
+                    await wipeFileChunksFromIndexedDB(vaultDb, fileId);
+
+                    // 3. Assemble and trigger Object URL creation
+                    const finalBlob = new Blob(decryptedChunksArray, { type: attachment.type });
+                    const url = URL.createObjectURL(finalBlob);
+
+                    // Save to session cache
+                    setDecryptedFiles(prev => ({ ...prev, [messageId]: url }));
+                    await cacheFile(messageId, finalBlob);
+
+                    if (setAttachmentCache) {
+                        setAttachmentCache(prev => ({ ...prev, [attachment.url]: url }));
+                    }
+                } catch (streamErr) {
+                    // Atomic Stream Failure Handler: clean database and rethrow
+                    await wipeFileChunksFromIndexedDB(vaultDb, fileId).catch(console.error);
+                    throw streamErr;
+                }
+            } else {
+                // 🚀 DETERMINISTIC ROUTING: Legacy JSON envelope fallback
+                const fileDataBuffer = await res.arrayBuffer();
+                let decryptedArrayBuffer;
+                const fileAesKey = forge.util.decode64(attachment.fileAesKey);
+
+                const textDecoder = new TextDecoder('utf-8');
+                const jsonText = textDecoder.decode(new Uint8Array(fileDataBuffer));
+                const encryptedFileObj = JSON.parse(jsonText);
+                decryptedArrayBuffer = await decryptFileWithAES(encryptedFileObj, fileAesKey);
+
+                const blob = new Blob([decryptedArrayBuffer], { type: attachment.type });
+                const url = URL.createObjectURL(blob);
+
+                // Save to SESSION state only (No localStorage for group privacy)
+                setDecryptedFiles(prev => ({ ...prev, [messageId]: url }));
+
+                // PROFESSIONAL CACHING: Save to persistent IndexedDB
+                await cacheFile(messageId, blob);
+
+                if (setAttachmentCache) {
+                    setAttachmentCache(prev => ({ ...prev, [attachment.url]: url }));
+                }
             }
         } catch (e) {
             console.error('Attachment decrypt failed:', e);
@@ -127,7 +283,7 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
         return (
             <div style={{ marginTop: '10px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <Loader size={18} className="animate-spin text-cyan-400" />
-                <span style={{ fontSize: '13px', color: '#aaa' }}>Downloading & Decrypting...</span>
+                <span style={{ fontSize: '13px', color: '#aaa' }}>Downloading & Decrypting ({downloadProgress}%) ...</span>
             </div>
         );
     }
@@ -210,7 +366,7 @@ const AttachmentViewer = ({ attachment, messageId, onImageClick, attachmentCache
 };
 
 const Chat = () => {
-    const { user, setUser: setCurrentUser, keys, logout, apiFetch, loading } = useAuth();
+    const { user, setUser: setCurrentUser, keys, logout, apiFetch, loading, syncVaultVersionEpoch } = useAuth();
     // 🧪 SURGICAL JWT CLAIMS INSPECTOR
     if (user?.accessToken) {
         try {
@@ -234,6 +390,7 @@ const Chat = () => {
     const [inputMsg, setInputMsg] = useState('');
     const [selectedFile, setSelectedFile] = useState(null);
     const [isUploading, setIsUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
     const [selectedImage, setSelectedImage] = useState(null);
     const fileInputRef = useRef(null);
     const [showCamera, setShowCamera] = useState(false);
@@ -985,90 +1142,30 @@ const Chat = () => {
         }
     };
 
-    const fetchAllUnreadCounts = async (friendsList, groupsList = []) => {
+    const fetchAllUnreadCounts = async (friendsList, groupsList) => {
         if (!keys) return;
 
-        for (const friend of friendsList) {
-            try {
-                const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/messages/${friend.userId}`);
-                if (res.ok) {
-                    const history = await res.json();
+        try {
+            const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/messages/unread-summaries`);
+            if (res.ok) {
+                const summaries = await res.json();
+                const updatedCounts = {};
 
-                    // Get the last time the user opened this chat IN THIS BROWSER
-                    let lastReadStr = localStorage.getItem(`lastRead_${friend.userId}`);
+                // 🚀 MUTABLE REF SHIELD: Read directly from synchronized references to defeat stale React closures
+                const activeFriends = (friendsList && friendsList.length > 0) ? friendsList : friendsRef.current;
+                const activeGroups = (groupsList && groupsList.length > 0) ? groupsList : groupsRef.current;
 
-                    // NEW BROWSER FIX: If no lastRead exists, find the last message I SENT.
-                    // Everything before my last sent message was clearly already seen by me.
-                    if (!lastReadStr) {
-                        const myLastMessage = [...history]
-                            .reverse()
-                            .find(m => m.senderId === user.userId);
-
-                        if (myLastMessage) {
-                            // Use the time of my last sent message as the baseline
-                            lastReadStr = myLastMessage.timestamp;
-                        } else {
-                            // Never spoken with this friend — use current time so nothing shows as unread
-                            lastReadStr = new Date().toISOString();
-                        }
-                        // Save this to avoid repeating on next render
-                        localStorage.setItem(`lastRead_${friend.userId}`, lastReadStr);
-                    }
-
-                    const lastReadTime = new Date(lastReadStr).getTime();
-
-                    // Count only messages TO ME that arrived AFTER lastRead
-                    const unreadCount = history.filter(m =>
-                        m.recipientId === user.userId &&
-                        new Date(m.timestamp).getTime() > lastReadTime
-                    ).length;
-
-                    setUnreadCounts(prev => ({
-                        ...prev,
-                        [friend.userId]: unreadCount
-                    }));
+                for (const friend of activeFriends) {
+                    updatedCounts[friend.userId] = summaries[friend.userId] || 0;
                 }
-            } catch (e) {
-                // silently skip if one friend fails
-            }
-        }
-        for (const group of groupsList) {
-            try {
-                const res = await apiFetch(`${import.meta.env.VITE_API_URL}/api/v1/groups/${group.groupId}/messages`);
-                if (res.ok) {
-                    const history = await res.json();
-
-                    // 1. Get the user's personal lastRead from roster or fallback to localStorage
-                    let lastReadStr = localStorage.getItem(`lastRead_${group.groupId}`);
-
-                    // Try to find the user's lastReadAt from the roster if available
-                    const roster = groupRosterKeys[group.groupId] || [];
-                    const me = roster.find(m => m.userId === user.userId);
-                    if (me && me.lastReadAt) {
-                        lastReadStr = me.lastReadAt;
-                    }
-
-                    if (!lastReadStr) {
-                        lastReadStr = new Date().toISOString();
-                        localStorage.setItem(`lastRead_${group.groupId}`, lastReadStr);
-                    }
-
-                    const lastReadTime = new Date(lastReadStr).getTime();
-
-                    // 2. Count messages sent AFTER my lastRead
-                    const unreadCount = history.filter(m =>
-                        m.senderId !== user.userId &&
-                        new Date(m.timestamp).getTime() > lastReadTime
-                    ).length;
-
-                    setUnreadCounts(prev => ({
-                        ...prev,
-                        [group.groupId]: unreadCount
-                    }));
+                for (const group of activeGroups) {
+                    updatedCounts[group.groupId] = summaries[group.groupId] || 0;
                 }
-            } catch (e) {
-                // silently skip
+
+                setUnreadCounts(updatedCounts);
             }
+        } catch (e) {
+            console.error("❌ Failed to fetch unread summaries", e);
         }
     };
 
@@ -1258,6 +1355,23 @@ const Chat = () => {
                     handleIncomingPayload(sdkMessage.body);
                 });
             }
+
+            // 3. Subscribe to identity queue (for real-time key/password rotations)
+            client.subscribe('/user/topic/identity', (sdkMessage) => {
+                try {
+                    const event = JSON.parse(sdkMessage.body);
+                    if (event.type === 'FORCE_LOGOUT') {
+                        console.warn('⚠️ [Security Alert] Core credentials rotated. Evicting session.');
+                        syncVaultVersionEpoch(null, 'BREACH');
+                        return;
+                    }
+                    if (event.type === 'IDENTITY_EPOCH_ROTATED' && event.vaultVersion) {
+                        syncVaultVersionEpoch(event.vaultVersion, 'ROUTINE');
+                    }
+                } catch (e) {
+                    console.error('Failed to parse identity rotation event:', e);
+                }
+            });
         };
 
         client.onStompError = (frame) => {
@@ -1285,6 +1399,70 @@ const Chat = () => {
     };
 
     const processedMessages = useRef(new Set());
+    const messageBufferRef = useRef([]);
+    const throttleTimerRef = useRef(null);
+
+    const flushMessageBuffer = () => {
+        if (messageBufferRef.current.length === 0) return;
+        
+        const messagesToFlush = [...messageBufferRef.current];
+        messageBufferRef.current = [];
+        
+        setMessagesByFriend(prev => {
+            let updatedState = { ...prev };
+            let hasChanges = false;
+            
+            for (const { chatId, message } of messagesToFlush) {
+                const history = updatedState[chatId] || [];
+                
+                if (message.isMe) {
+                    const matchIndex = history.findIndex(m =>
+                        m.isMe &&
+                        m.status === 'PENDING' &&
+                        m.content === message.content &&
+                        (m.attachment?.name === message.attachment?.name)
+                    );
+
+                    if (matchIndex !== -1) {
+                        const updatedHistory = [...history];
+                        updatedHistory[matchIndex] = {
+                            ...updatedHistory[matchIndex],
+                            id: message.id,
+                            status: 'SENT',
+                            rawTimestamp: message.rawTimestamp,
+                            displayTimestamp: message.displayTimestamp
+                        };
+                        updatedState[chatId] = updatedHistory;
+                        hasChanges = true;
+                        continue;
+                    }
+                }
+                
+                updatedState[chatId] = [...history, message];
+                hasChanges = true;
+            }
+            
+            return hasChanges ? updatedState : prev;
+        });
+    };
+
+    const scheduleFlush = () => {
+        if (!throttleTimerRef.current) {
+            throttleTimerRef.current = setTimeout(() => {
+                flushMessageBuffer();
+                throttleTimerRef.current = null;
+            }, 50);
+        }
+    };
+
+    useEffect(() => {
+        return () => {
+            if (throttleTimerRef.current) {
+                clearTimeout(throttleTimerRef.current);
+                flushMessageBuffer();
+            }
+        };
+    }, []);
     const handleIncomingMessage = (payload) => {
         // 0. Defensive Normalization (Handle snake_case vs camelCase)
         const senderId = payload.senderId || payload.sender_id;
@@ -1384,43 +1562,80 @@ const Chat = () => {
         let attachment = null;
         const currentKeys = keysRef.current;
 
-        try {
-            // Check cache first
-            let aesKeyStr = messageId ? KeyCache.getKey(messageId) : null;
-
-            if (!aesKeyStr && currentKeys) {
-                const wrappedKey = groupId
-                    ? ((wrappedKeys && wrappedKeys[user.userId]) || payload.encryptedAESKey || payload.encryptedAesKey || payload.encrypted_aes_key)
-                    : (senderId === user.userId
-                        ? (payload.senderEncryptedAESKey || payload.senderEncryptedAesKey || payload.sender_encrypted_aes_key)
-                        : payload.encryptedAESKey);
-
-                if (wrappedKey) {
-                    aesKeyStr = decryptAESKeyWithRSA(wrappedKey, currentKeys.privateKey);
-                    if (messageId) KeyCache.saveKey(messageId, aesKeyStr);
-                }
-            }
-
-            if (aesKeyStr) {
-                const encryptedData = {
-                    ciphertext: encryptedContent,
-                    iv: iv,
-                    tag: tag
-                };
-
-                const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
+        const processMessageQueue = async () => {
+            if (groupId && payload.sequenceNumber !== undefined) {
+                // Phase 6 Megolm Engine integration with the UI Fast-Queue
+                return new Promise((resolve, reject) => {
+                    enqueueGroupDecryption(groupId, async () => {
+                        const plaintext = await decryptGroupMessageMegolm(
+                            vaultDb,
+                            groupId,
+                            senderId,
+                            payload.sequenceNumber,
+                            encryptedContent,
+                            iv,
+                            tag,
+                            payload.sessionId
+                        );
+                        
+                        const parsed = JSON.parse(plaintext);
+                        return JSON.stringify({
+                            content: parsed.text || "",
+                            attachment: parsed.attachment || null
+                        });
+                    }).then(resultStr => {
+                        if (!resultStr) return resolve({ content: "🔒 [Decryption Failed]", attachment: null });
+                        const result = JSON.parse(resultStr);
+                        resolve({ content: result.content, attachment: result.attachment });
+                    }).catch(err => {
+                        console.warn("🛡️ [Megolm Engine] Message dropped by queue:", err);
+                        resolve({ content: "🔒 [Decryption Failed]", attachment: null });
+                    });
+                });
+            } else {
+                // Legacy / 1-to-1 RSA Decryption Fallback
                 try {
-                    const parsed = JSON.parse(decryptedStr);
-                    decryptedContent = parsed.text || "";
-                    attachment = parsed.attachment || null;
-                } catch (e) {
-                    decryptedContent = decryptedStr;
+                    // Check cache first
+                    let aesKeyStr = messageId ? KeyCache.getKey(messageId) : null;
+
+                    if (!aesKeyStr && currentKeys) {
+                        const wrappedKey = groupId
+                            ? ((wrappedKeys && wrappedKeys[user.userId]) || payload.encryptedAESKey || payload.encryptedAesKey || payload.encrypted_aes_key)
+                            : (senderId === user.userId
+                                ? (payload.senderEncryptedAESKey || payload.senderEncryptedAesKey || payload.sender_encrypted_aes_key)
+                                : payload.encryptedAESKey);
+
+                        if (wrappedKey) {
+                            aesKeyStr = decryptAESKeyWithRSA(wrappedKey, currentKeys.privateKey);
+                            if (messageId) KeyCache.saveKey(messageId, aesKeyStr);
+                        }
+                    }
+
+                    if (aesKeyStr) {
+                        const encryptedData = {
+                            ciphertext: encryptedContent,
+                            iv: iv,
+                            tag: tag
+                        };
+
+                        const decryptedStr = decryptMessageWithAES(encryptedData, aesKeyStr);
+                        try {
+                            const parsed = JSON.parse(decryptedStr);
+                            return { content: parsed.text || "", attachment: parsed.attachment || null };
+                        } catch (e) {
+                            return { content: decryptedStr, attachment: null };
+                        }
+                    }
+                } catch (error) {
+                    console.error('Decryption failed', error);
                 }
+                return { content: "🔒 [Decryption Failed]", attachment: null };
             }
-        } catch (error) {
-            console.error('Decryption failed', error);
-            decryptedContent = "🔒 [Decryption Failed]";
-        }
+        };
+
+        processMessageQueue().then(({ content: finalDecryptedContent, attachment: finalAttachment }) => {
+            decryptedContent = finalDecryptedContent;
+            attachment = finalAttachment;
 
         // 🚀 FIX 1: Route self-messages to the recipient's chat inbox, not our own!
         const isSelfMessage = senderId === user.userId;
@@ -1442,83 +1657,59 @@ const Chat = () => {
             ));
         }
 
-        const incomingMessage = {
-            id: payload.id || Date.now(),
-            sender: senderId,
-            content: decryptedContent,
-            attachment: attachment,
-            isMe: isSelfMessage,
-            status: 'SENT',
-            rawTimestamp: payload.timestamp || new Date().toISOString(),
-            displayTimestamp: new Date().toLocaleTimeString()
-        };
+            const incomingMessage = {
+                id: payload.id || Date.now(),
+                sender: senderId,
+                content: decryptedContent,
+                attachment: attachment,
+                isMe: isSelfMessage,
+                status: 'SENT',
+                rawTimestamp: payload.timestamp || new Date().toISOString(),
+                displayTimestamp: new Date().toLocaleTimeString()
+            };
 
-        // 🚀 FIX 2: Functional state update with Smart Deduplication
-        setMessagesByFriend(prev => {
-            const history = prev[chatId] || [];
+            // 🚀 FIX 2: Functional state update via the Throttle Queue
+            messageBufferRef.current.push({ chatId, message: incomingMessage });
+            scheduleFlush();
 
-            // 🚀 Deduplicate & Replace Engine: If we sent this, swap the optimistic PENDING message with the server message in-place
-            if (isSelfMessage) {
-                const matchIndex = history.findIndex(m =>
-                    m.isMe &&
-                    m.status === 'PENDING' &&
-                    m.content === decryptedContent &&
-                    (m.attachment?.name === attachment?.name)
-                );
+            // If we are NOT viewing this chat, mark as unread + show toast
+            const isCurrentChat = activeGroupRef.current
+                ? activeGroupRef.current.groupId === payload.groupId
+                : activeFriendRef.current?.userId === payload.senderId && !payload.groupId;
 
-                if (matchIndex !== -1) {
-                    const updatedHistory = [...history];
-                    updatedHistory[matchIndex] = {
-                        ...updatedHistory[matchIndex],
-                        id: incomingMessage.id,
-                        status: 'SENT',
-                        rawTimestamp: incomingMessage.rawTimestamp,
-                        displayTimestamp: incomingMessage.displayTimestamp
-                    };
-                    return { ...prev, [chatId]: updatedHistory };
+            if (!isCurrentChat) {
+                setUnreadCounts(prev => ({
+                    ...prev,
+                    [chatId]: (prev[chatId] || 0) + 1
+                }));
+
+                let senderName = 'Someone';
+                if (payload.groupId) {
+                    const group = groupsRef.current.find(g => g.groupId === payload.groupId);
+                    senderName = group ? `Group: ${group.name}` : 'Group Message';
+                } else {
+                    const senderFriend = friendsRef.current.find(f => f.userId === payload.senderId);
+                    senderName = senderFriend ? senderFriend.username : 'Someone';
+                }
+                showToast(senderName, attachment ? '📁 Sent an attachment' : decryptedContent);
+            } else {
+                // Mark as read locally
+                localStorage.setItem(`lastRead_${chatId}`, new Date().toISOString());
+
+                // Send Read Receipt for 1-on-1 chats
+                if (!payload.groupId && stompClient.current?.connected) {
+                    stompClient.current.publish({
+                        destination: '/app/chat.receipt',
+                        body: JSON.stringify({
+                            messageId: messageId,
+                            senderId: senderId,
+                            recipientId: user.userId,
+                            status: 'READ'
+                        })
+                    });
                 }
             }
-
-            return { ...prev, [chatId]: [...history, incomingMessage] };
         });
-
-        // If we are NOT viewing this chat, mark as unread + show toast
-        const isCurrentChat = activeGroupRef.current
-            ? activeGroupRef.current.groupId === payload.groupId
-            : activeFriendRef.current?.userId === payload.senderId && !payload.groupId;
-
-        if (!isCurrentChat) {
-            setUnreadCounts(prev => ({
-                ...prev,
-                [chatId]: (prev[chatId] || 0) + 1
-            }));
-
-            let senderName = 'Someone';
-            if (payload.groupId) {
-                const group = groupsRef.current.find(g => g.groupId === payload.groupId);
-                senderName = group ? `Group: ${group.name}` : 'Group Message';
-            } else {
-                const senderFriend = friendsRef.current.find(f => f.userId === payload.senderId);
-                senderName = senderFriend ? senderFriend.username : 'Someone';
-            }
-            showToast(senderName, attachment ? '📁 Sent an attachment' : decryptedContent);
-        } else {
-            // Mark as read locally
-            localStorage.setItem(`lastRead_${chatId}`, new Date().toISOString());
-
-            // Send Read Receipt for 1-on-1 chats
-            if (!payload.groupId && stompClient.current?.connected) {
-                stompClient.current.publish({
-                    destination: '/app/chat.receipt',
-                    body: JSON.stringify({
-                        messageId: messageId,
-                        senderId: senderId,
-                        recipientId: user.userId,
-                        status: 'READ'
-                    })
-                });
-            }
-        }
     };
 
     // Camera functions
@@ -1726,32 +1917,190 @@ const Chat = () => {
             let attachmentData = null;
             if (selectedFile) {
                 const fileAesKey = generateAESKey();
-                const arrayBuffer = await selectedFile.arrayBuffer();
-                const encryptedFileObj = encryptFileWithAES(arrayBuffer, fileAesKey);
+                const rawKeyBytes = new Uint8Array(32);
+                for (let i = 0; i < 32; i++) {
+                    rawKeyBytes[i] = fileAesKey.charCodeAt(i);
+                }
 
-                const blob = new Blob([JSON.stringify(encryptedFileObj)], { type: 'application/json' });
+                const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB
+                const fileId = window.crypto.randomUUID(); // Binds AAD to prevent cross-file swapping
+                const baseIv = window.crypto.getRandomValues(new Uint8Array(12));
+                const expectedFileSize = selectedFile.size;
+                
+                let downloadUrl = null;
+                setUploadProgress(0);
 
-                // Upload to LOCAL BACKEND instead of Firebase
-                const formData = new FormData();
-                formData.append('file', blob, selectedFile.name + '.enc');
+                // 🚀 V2 AEAD Streaming Protocol: The TransformStream Engine
+                const cryptoKey = await window.crypto.subtle.importKey("raw", rawKeyBytes, "AES-GCM", false, ["encrypt"]);
+                
+                let chunkIndex = 0;
+                let buffer = new Uint8Array(0);
+                let bytesProcessed = 0;
 
-                const uploadRes = await fetch(`${import.meta.env.VITE_API_URL}/api/v1/attachments/upload`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + user.accessToken
+                const aeadTransformStream = new TransformStream({
+                    async transform(chunk, controller) {
+                        const newBuffer = new Uint8Array(buffer.length + chunk.length);
+                        newBuffer.set(buffer, 0);
+                        newBuffer.set(chunk, buffer.length);
+                        buffer = newBuffer;
+
+                        while (buffer.length >= CHUNK_SIZE) {
+                            const chunkToEncrypt = buffer.slice(0, CHUNK_SIZE);
+                            buffer = buffer.slice(CHUNK_SIZE);
+                            
+                            // Deterministic IV Derivation
+                            const iv = new Uint8Array(12);
+                            iv.set(baseIv);
+                            const dv = new DataView(iv.buffer);
+                            dv.setUint32(8, chunkIndex, false); // Inject chunk index into the last 4 bytes of IV
+
+                            // Cryptographic Binding (AAD)
+                            const textEncoder = new TextEncoder();
+                            const isLastChunk = false;
+                            const aadPayload = JSON.stringify([fileId, chunkIndex, isLastChunk ? 0x01 : 0x00]);
+                            const aad = textEncoder.encode(aadPayload);
+
+                            const encryptedBuffer = await window.crypto.subtle.encrypt(
+                                { name: "AES-GCM", iv: iv, additionalData: aad },
+                                cryptoKey,
+                                chunkToEncrypt
+                            );
+
+                            controller.enqueue(new Uint8Array(encryptedBuffer));
+                            bytesProcessed += CHUNK_SIZE;
+                            chunkIndex++;
+                            
+                            const percentage = Math.round((bytesProcessed / expectedFileSize) * 100);
+                            if (percentage % 5 === 0) setUploadProgress(percentage);
+                        }
                     },
-                    body: formData
+                    async flush(controller) {
+                        if (buffer.length > 0 || chunkIndex === 0) {
+                            const iv = new Uint8Array(12);
+                            iv.set(baseIv);
+                            const dv = new DataView(iv.buffer);
+                            dv.setUint32(8, chunkIndex, false);
+
+                            const textEncoder = new TextEncoder();
+                            const isLastChunk = true;
+                            const aadPayload = JSON.stringify([fileId, chunkIndex, isLastChunk ? 0x01 : 0x00]);
+                            const aad = textEncoder.encode(aadPayload);
+
+                            const encryptedBuffer = await window.crypto.subtle.encrypt(
+                                { name: "AES-GCM", iv: iv, additionalData: aad },
+                                cryptoKey,
+                                buffer
+                            );
+
+                            controller.enqueue(new Uint8Array(encryptedBuffer));
+                            setUploadProgress(100);
+                        }
+                    }
                 });
 
-                if (!uploadRes.ok) throw new Error("Upload failed");
-                const uploadData = await uploadRes.json();
-                const downloadUrl = uploadData.url;
+                // Pipe the file stream through the V2 AEAD encryptor
+                const encryptedStream = selectedFile.stream().pipeThrough(aeadTransformStream);
+                const reader = encryptedStream.getReader();
+
+                // 🛡️ Cancellability: Instantiate AbortController for current upload transaction
+                const abortController = new AbortController();
+                const { signal } = abortController;
+
+                // ⚠️ PRODUCTION FORK WARNING:
+                // This sequential chunk uploader is designed as a Local Development & Mock Bridge
+                // targeting Spring Boot's single-node appendStream endpoint.
+                // BEFORE DEPLOYING TO HORIZONTALLY SCALED CLOUD ENVIRONMENTS (Kubernetes/AWS):
+                // Swap the target URL below to use S3 Pre-Signed PUT URLs to bypass the local JVM
+                // data plane entirely, preventing the Split-Disk load balancer shredding trap.
+                const totalChunks = Math.ceil(expectedFileSize / CHUNK_SIZE);
+
+                chunkIndex = 0;
+                let uploadData = null;
+
+                try {
+                    while (true) {
+                        // Lifecycle check: Halt stream decryption instantly if aborted
+                        if (signal.aborted) {
+                            throw new DOMException("Upload transaction aborted by user request.", "AbortError");
+                        }
+
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        // Wrap ONLY this single 5MB encrypted chunk in a Blob to bypass ALPN streaming requirements
+                        const microBlob = new Blob([value], { type: 'application/octet-stream' });
+
+                        // 🛡️ Bounded Micro-Retry Transport Loop (3 Attempts, Jittered Exponential Backoff)
+                        let attempts = 0;
+                        const maxAttempts = 3;
+                        let success = false;
+
+                        while (attempts < maxAttempts && !success) {
+                            try {
+                                const uploadRes = await fetch(`${import.meta.env.VITE_API_URL}/api/v1/streaming-upload`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Authorization': 'Bearer ' + user.accessToken,
+                                        'X-File-ID': fileId,
+                                        'X-Chunk-Index': String(chunkIndex),
+                                        'X-Total-Chunks': String(totalChunks),
+                                        'X-File-Name': selectedFile.name + '.enc',
+                                        'X-Sender-Id': user.userId,
+                                        'X-Version': '2'
+                                    },
+                                    body: microBlob,
+                                    signal: signal
+                                });
+
+                                if (!uploadRes.ok) throw new Error(`Status ${uploadRes.status}`);
+
+                                uploadData = await uploadRes.json();
+                                success = true;
+                            } catch (err) {
+                                attempts++;
+                                console.warn(`[Network Handoff] Chunk ${chunkIndex} failed (Attempt ${attempts}/${maxAttempts}):`, err);
+                                
+                                if (attempts >= maxAttempts) {
+                                    throw new Error(`Fatal Network Loss: Chunk ${chunkIndex} failed after ${maxAttempts} attempts.`);
+                                }
+
+                                // 🛡️ Thundering Herd Prevention: Exponential Backoff with Random Jitter
+                                const delay = (Math.pow(2, attempts) * 1000) + (Math.random() * 1000);
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            }
+                        }
+
+                        setUploadProgress(Math.round(((chunkIndex + 1) / totalChunks) * 100));
+                        chunkIndex++;
+                    }
+                } finally {
+                    // 🛡️ Memory Hygiene: Explicitly release the stream lock to prevent memory leaks
+                    try {
+                        await reader.cancel();
+                    } catch (e) {
+                        // Fail-silent on stream cancel to prevent overriding the main exception
+                    }
+                }
+
+                downloadUrl = uploadData?.url;
+
+                if (!downloadUrl) {
+                    throw new Error("Finalized upload URL missing from server response");
+                }
+
+                const base64Key = typeof fileAesKey === 'string'
+                    ? forge.util.encode64(fileAesKey)
+                    : forge.util.encode64(String.fromCharCode.apply(null, new Uint8Array(fileAesKey)));
 
                 attachmentData = {
                     url: downloadUrl,
                     type: selectedFile.type,
                     name: selectedFile.name,
-                    fileAesKey: forge.util.encode64(fileAesKey)
+                    fileAesKey: base64Key,
+                    baseIv: forge.util.encode64(String.fromCharCode.apply(null, baseIv)),
+                    messageId: fileId,
+                    expectedFileSize: expectedFileSize,
+                    version: 2 // 🚀 PRAMA V2 AEAD STREAMING PROTOCOL
                 };
             }
 
@@ -1841,7 +2190,7 @@ const Chat = () => {
             setMessagesByFriend(prev => ({
                 ...prev,
                 [chatId]: [...(prev[chatId] || []), {
-                    id: crypto.randomUUID(),
+                    id: window.crypto.randomUUID(),
                     sender: user.userId,
                     content: inputMsg,
                     attachment: attachmentData,
@@ -2141,6 +2490,9 @@ const Chat = () => {
                         }} />
                         {status}
                     </div>
+                    <button onClick={() => syncVaultVersionEpoch(2, 'ROUTINE')} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(102, 252, 241, 0.1)', color: '#66fcf1', marginBottom: '10px' }}>
+                        <Cloud size={18} /> Sync Cloud Keys
+                    </button>
                     <button onClick={() => { logout(); purgePramaCache(); navigate('/'); }} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(255,107,107,0.1)', color: '#ff6b6b' }}>
                         <LogOut size={18} /> Logout
                     </button>
@@ -2537,7 +2889,7 @@ const Chat = () => {
                                                 title="Remove Member"
                                             >
                                                 <div style={{ color: '#888' }} className="group-hover:text-red-400">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="22" x1="16" y2="19" y2="19" /></svg>
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="22" y1="19" x2="16" y2="19" /></svg>
                                                 </div>
                                                 <span style={{ fontSize: '14px', fontWeight: '500' }}>Remove Member</span>
                                             </button>
@@ -3031,7 +3383,14 @@ const Chat = () => {
                             disabled={!(activeFriend || activeGroup) || isUploading}
                         />
                         <button onClick={sendMessage} className="glass-button" disabled={!(activeFriend || activeGroup) || isUploading || (!inputMsg.trim() && !selectedFile)}>
-                            {isUploading ? <Loader className="spin" size={20} /> : <Send size={20} />}
+                            {isUploading ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    <Loader className="spin" size={16} />
+                                    <span style={{ fontSize: '10px', color: '#66fcf1', fontWeight: 'bold' }}>{uploadProgress}%</span>
+                                </div>
+                            ) : (
+                                <Send size={20} />
+                            )}
                         </button>
                     </div>
                 </div>

@@ -1,21 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Modal, LayoutAnimation, UIManager, AppState, AppStateStatus, ScrollView } from 'react-native';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Modal, LayoutAnimation, UIManager, AppState, AppStateStatus, ScrollView, InteractionManager } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { Client } from '@stomp/stompjs';
 import * as WebBrowser from 'expo-web-browser';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 
-// Safe require for native modules to prevent crashes
-let Sharing = null;
-try {
-    Sharing = require('expo-sharing');
-} catch (e) {
-}
+import * as Sharing from 'expo-sharing';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useWebSocket } from '../../context/WebSocketContext';
-import { Send, ShieldCheck, ArrowLeft, Paperclip, Camera, FileText, X, Loader2, Forward, Download, Image as ImageIcon, Check } from 'lucide-react-native';
+import { Send, ShieldCheck, ArrowLeft, Paperclip, Camera, FileText, X, Loader2, Forward, Download, Image as ImageIcon, Check, Reply } from 'lucide-react-native';
+import { Swipeable } from 'react-native-gesture-handler';
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
@@ -34,12 +31,15 @@ import forge from 'node-forge';
 import { Buffer } from 'buffer';
 import { MessageOrchestrator, SecureMessagePacket } from '../../utils/MessageOrchestrator';
 import { ReceiptManager } from '../../utils/ReceiptManager';
-import { encryptFile, decryptFile } from '../../modules/aes-gcm-crypto/AesGcmCrypto';
+import { encryptFile, decryptFile, isNativeCryptoAvailable } from '../../modules/aes-gcm-crypto/AesGcmCrypto';
 import { IdentityManager } from '../../utils/IdentityManager';
 import { GroupAdminService } from '../../utils/GroupAdminService';
 import { BiometricManager } from '../../utils/BiometricManager';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { globalAttachmentCache } from '../../utils/AttachmentCache';
+import { decryptGroupMessageMegolm, enqueueGroupDecryption } from '../../utils/GroupRatchetEngine';
+import { registerActiveTransfer, deregisterActiveTransfer } from '../../utils/ActiveTransfersRegistry';
+import { saveLocalMessage, getLocalMessages, maskId } from '../../utils/LocalDatabase';
 
 const computeSHA256Fingerprint = (pem: string) => {
   if (!pem) return "";
@@ -150,6 +150,7 @@ const decryptIncomingMessage = async (m: any, masterKey: Uint8Array, currentUser
 };
 
 const AttachmentViewer = ({ attachment, setSelectedImage, apiFetch, onForward }: { attachment: any, setSelectedImage: any, apiFetch: any, onForward: any }) => {
+    const { user } = useAuth();
     const decryptedUrl = globalAttachmentCache[attachment.url] || null;
     const isDownloaded = !!decryptedUrl;
     const [isDecrypting, setIsDecrypting] = useState(false);
@@ -182,31 +183,158 @@ const AttachmentViewer = ({ attachment, setSelectedImage, apiFetch, onForward }:
 
       const handleDownloadAndDecrypt = async () => {
         setIsDecrypting(true);
+        const safeName = attachment?.url?.replace(/[^a-zA-Z0-9]/g, '_') || 'temp_file';
+        const fileUri = FileSystem.documentDirectory + safeName;
+        
         try {
-          const res = await apiFetch(`${API_BASE_URL}${attachment.url}`);
-          if (!res.ok) throw new Error('Download failed');
-          const resText = await res.text();
-          const encryptedData = JSON.parse(resText);
-          // Decode the base64‑encoded AES key stored on the attachment
-          let fileAesKey = attachment.fileAesKey;
-          if (typeof fileAesKey === 'string') {
-            // mobile stores the key as base64 string
-            fileAesKey = Buffer.from(fileAesKey, 'base64').toString('binary');
-          }
-          const decryptedArrayBuffer = decryptFileWithAES(encryptedData, fileAesKey);
-          const base64 = forge.util.encode64(forge.util.createBuffer(decryptedArrayBuffer).getBytes());
-          try {
+          if (attachment.version === 2) {
+            console.log('⚡ [Downloader] Standard Raw Binary Stream Version 2 detected.');
+            if (isNativeCryptoAvailable() && FileSystem && attachment.iv) {
+              console.log('⚡ [Downloader] Native C++ streaming decryption engine active.');
+              const tempEncPath = FileSystem.documentDirectory + 'download_' + (attachment.name || 'temp') + '.enc';
+              
+              registerActiveTransfer(tempEncPath);
+              try {
+                // 1. Download directly to cached encrypted file path
+                const downloadResult = await FileSystem.downloadAsync(
+                  `${API_BASE_URL}${attachment.url}`,
+                  tempEncPath,
+                  {
+                    headers: {
+                      'Authorization': 'Bearer ' + user?.accessToken
+                    }
+                  }
+                );
+
+                if (!downloadResult || downloadResult.status !== 200) {
+                  throw new Error('Streaming download failed');
+                }
+
+                const baseIv = attachment.baseIv || attachment.iv;
+                const fileId = attachment.messageId || attachment.iv;
+                const jointIvParam = `${baseIv}:${fileId}`;
+
+                // 2. Perform native low-level chunk decryption
+                await decryptFile(
+                  tempEncPath,
+                  fileUri,
+                  attachment.fileAesKey, // Already Base64 on mobile
+                  jointIvParam
+                );
+
+                // 3. Clean up temp encrypted file
+                await FileSystem.deleteAsync(tempEncPath, { idempotent: true });
+                setLocalUrl(fileUri);
+                globalAttachmentCache[attachment.url] = fileUri;
+              } finally {
+                deregisterActiveTransfer(tempEncPath);
+                try {
+                  await FileSystem.deleteAsync(tempEncPath, { idempotent: true });
+                } catch (e) {}
+              }
+            } else {
+              console.log('⚠️ [Downloader] Falling back to JS-heap in-memory raw binary decryption...');
+              const expectedSize = attachment.expectedFileSize || attachment.size || 0;
+              if (expectedSize > 5 * 1024 * 1024) {
+                 Alert.alert('Unsupported', 'Native Cryptography Engine Unavailable - Cannot decrypt large files');
+                 throw new Error('Native Cryptography Engine Unavailable - Cannot decrypt large files');
+              }
+              const res = await apiFetch(`${API_BASE_URL}${attachment.url}`);
+              if (!res.ok) throw new Error('Download failed');
+              
+              const fileDataBuffer = await res.arrayBuffer();
+              const totalLength = fileDataBuffer.byteLength;
+              const ENCRYPTED_CHUNK_SIZE = 5 * 1024 * 1024 + 16;
+              let remainingBytes = totalLength;
+              let offset = 0;
+              let chunkIndex = 0;
+
+              const decryptedChunks: Uint8Array[] = [];
+
+              const baseIv = attachment.baseIv || attachment.iv;
+              const fileId = attachment.messageId || attachment.iv;
+
+              let fileAesKey = attachment.fileAesKey;
+              if (typeof fileAesKey === 'string' && fileAesKey.length !== 32) {
+                fileAesKey = Buffer.from(fileAesKey, 'base64').toString('binary');
+              }
+
+              const decodedBaseIv = Buffer.from(baseIv, 'base64');
+
+              while (remainingBytes > 0) {
+                const currentChunkSize = Math.min(remainingBytes, ENCRYPTED_CHUNK_SIZE);
+                const chunkView = new Uint8Array(fileDataBuffer, offset, currentChunkSize);
+
+                // Derive deterministic chunk IV
+                const ivBytes = new Uint8Array(12);
+                for (let i = 0; i < 12; i++) ivBytes[i] = decodedBaseIv[i];
+                const ivDv = new DataView(ivBytes.buffer);
+                ivDv.setUint32(8, chunkIndex, false); // Big-Endian
+
+                const cipherBytes = chunkView.slice(0, currentChunkSize - 16);
+                const tagBytes = chunkView.slice(currentChunkSize - 16);
+
+                const isEOF = remainingBytes <= ENCRYPTED_CHUNK_SIZE;
+                const isLastChunkFlag = isEOF ? 1 : 0;
+
+                // Reconstruct JSON string AAD header
+                const aadString = JSON.stringify([fileId, chunkIndex, isLastChunkFlag]);
+                const aadBinary = Buffer.from(aadString, 'utf8').toString('binary');
+
+                const encryptedData = {
+                  iv: Buffer.from(ivBytes).toString('base64'),
+                  ciphertext: Buffer.from(cipherBytes).toString('base64'),
+                  tag: Buffer.from(tagBytes).toString('base64')
+                };
+
+                const decryptedArrayBuffer = decryptFileWithAES(encryptedData, fileAesKey, aadBinary);
+                decryptedChunks.push(new Uint8Array(decryptedArrayBuffer));
+
+                chunkIndex++;
+                offset += currentChunkSize;
+                remainingBytes -= currentChunkSize;
+              }
+
+              // Combine all decrypted chunks into a single contiguous output buffer
+              let totalPlainSize = 0;
+              for (const c of decryptedChunks) totalPlainSize += c.length;
+              const combinedPlain = new Uint8Array(totalPlainSize);
+              let plainOffset = 0;
+              for (const c of decryptedChunks) {
+                combinedPlain.set(c, plainOffset);
+                plainOffset += c.length;
+              }
+
+              const base64 = forge.util.encode64(Buffer.from(combinedPlain).toString('binary'));
+              if (FileSystem) {
+                await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: FileSystem.EncodingType.Base64 });
+                setLocalUrl(fileUri);
+                globalAttachmentCache[attachment.url] = fileUri;
+              }
+            }
+          } else {
+            console.log('⚠️ [Downloader] Legacy JSON attachment detected, running JS parser...');
+            const res = await apiFetch(`${API_BASE_URL}${attachment.url}`);
+            if (!res.ok) throw new Error('Download failed');
+            
+            const resText = await res.text();
+            const encryptedData = JSON.parse(resText);
+            
+            let fileAesKey = attachment.fileAesKey;
+            if (typeof fileAesKey === 'string' && fileAesKey.length !== 32) {
+              fileAesKey = Buffer.from(fileAesKey, 'base64').toString('binary');
+            }
+
+            const decryptedArrayBuffer = decryptFileWithAES(encryptedData, fileAesKey);
+            const base64 = forge.util.encode64(forge.util.createBuffer(decryptedArrayBuffer).getBytes());
             if (FileSystem) {
-              const safeName = attachment?.url?.replace(/[^a-zA-Z0-9]/g, '_') || 'temp_file';
-              const fileUri = FileSystem.documentDirectory + safeName;
               await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: FileSystem.EncodingType.Base64 });
               setLocalUrl(fileUri);
               globalAttachmentCache[attachment.url] = fileUri;
             }
-          } catch (e) {
-            console.warn('Could not cache to FS', e);
           }
-        } catch (e) {
+        } catch (e: any) {
+          console.error('❌ [Downloader] Attachment decryption failure:', e.message || e);
           Alert.alert('Error', 'Could not decrypt attachment.');
         }
         setIsDecrypting(false);
@@ -324,6 +452,153 @@ const shredDecryptedAttachment = (attachment: any) => {
   }
 };
 
+interface MessageRowProps {
+  item: any;
+  isMe: boolean;
+  displayStatus: string;
+  onLongPress: (item: any) => void;
+  onSwipeOpen: (item: any) => void;
+  currentlyOpenSwipeableRef: React.MutableRefObject<any>;
+  activeSwipeIdRef: React.MutableRefObject<string | null>;
+  setSelectedImage: (url: string | null) => void;
+  apiFetch: any;
+  onForward: (attachment: any) => void;
+  messagesMap: Record<string, any>;
+}
+
+const MessageRow = React.memo(({
+  item,
+  isMe,
+  displayStatus,
+  onLongPress,
+  onSwipeOpen,
+  currentlyOpenSwipeableRef,
+  activeSwipeIdRef,
+  setSelectedImage,
+  apiFetch,
+  onForward,
+  messagesMap
+}: MessageRowProps) => {
+  const swipeableRef = useRef<any>(null);
+
+  if (item.isDeleted || item.is_deleted) {
+    return (
+      <View style={[styles.messageWrapper, isMe ? styles.myMessageWrapper : styles.theirMessageWrapper, { marginVertical: 4, opacity: 0.6 }]}>
+        <View style={{ backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <ShieldCheck size={14} color="#888" />
+          <Text style={{ fontStyle: 'italic', color: '#888', fontSize: 11 }}>
+            This message was deleted for everyone
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  let clearText = item.content;
+  if (item.isEdited || item.is_edited) {
+    clearText += " (edited)";
+  }
+
+  const handleWillOpen = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (currentlyOpenSwipeableRef.current && currentlyOpenSwipeableRef.current !== swipeableRef.current) {
+      try {
+        currentlyOpenSwipeableRef.current.close();
+      } catch (err) {}
+    }
+    currentlyOpenSwipeableRef.current = swipeableRef.current;
+    activeSwipeIdRef.current = String(item.id);
+  };
+
+  const handleOpen = () => {
+    onSwipeOpen(item);
+    setTimeout(() => {
+      try {
+        swipeableRef.current?.close();
+      } catch (err) {}
+    }, 100);
+  };
+
+  const renderLeftActions = () => {
+    return (
+      <View style={styles.swipeReplyActionContainer}>
+        <Reply color="#66fcf1" size={22} />
+      </View>
+    );
+  };
+
+  let replyText = null;
+  let replySender = null;
+  if (item.replyToId) {
+    const parent = messagesMap[String(item.replyToId)];
+    if (parent) {
+      replySender = item.replyToSender || "Friend";
+      replyText = parent.isDeleted ? "[Deleted Message]" : parent.content;
+    } else {
+      replySender = item.replyToSender || "Friend";
+      replyText = item.replyToText || "🔒 [Message Encrypted/Unavailable]";
+    }
+  }
+
+  return (
+    <Swipeable
+      ref={swipeableRef}
+      renderLeftActions={renderLeftActions}
+      onSwipeableWillOpen={handleWillOpen}
+      onSwipeableOpen={handleOpen}
+      leftThreshold={60}
+      friction={2}
+      failOffsetY={[-5, 5]}
+      activeOffsetX={[-10, 10]}
+    >
+      <TouchableOpacity 
+        activeOpacity={0.8}
+        onLongPress={() => onLongPress(item)}
+        style={[styles.messageWrapper, isMe ? styles.myMessageWrapper : styles.theirMessageWrapper]}
+      >
+        <View style={[styles.messageBubble, isMe ? styles.myBubble : styles.theirBubble]}>
+          {replyText && (
+            <View style={styles.quotedMessageBlock}>
+              <Text style={styles.quotedSenderText}>{replySender}</Text>
+              <Text style={styles.quotedBodyText} numberOfLines={1}>
+                {replyText}
+              </Text>
+            </View>
+          )}
+          {clearText ? (
+            <Text style={[styles.messageText, isMe ? styles.myText : styles.theirText]}>
+              {clearText}
+            </Text>
+          ) : null}
+          {item.attachment && <AttachmentViewer attachment={item.attachment} setSelectedImage={setSelectedImage} apiFetch={apiFetch} onForward={onForward} />}
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: isMe ? 'flex-end' : 'flex-start', marginTop: 4, gap: 4 }}>
+          <Text style={styles.messageTime}>{item.time}</Text>
+          {isMe && (
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {displayStatus === 'SENT' && <Check color="#555" size={12} />}
+              {(displayStatus === 'DELIVERED' || displayStatus === 'READ') && (
+                <View style={{ flexDirection: 'row', marginLeft: -4 }}>
+                  <Check color={displayStatus === 'READ' ? '#00ff88' : '#555'} size={12} />
+                  <Check color={displayStatus === 'READ' ? '#00ff88' : '#555'} size={12} style={{ marginLeft: -8 }} />
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+      </TouchableOpacity>
+    </Swipeable>
+  );
+}, (prevProps, nextProps) => {
+  return (
+    prevProps.item.content === nextProps.item.content &&
+    prevProps.item.isEdited === nextProps.item.isEdited &&
+    prevProps.item.isDeleted === nextProps.item.isDeleted &&
+    prevProps.displayStatus === nextProps.displayStatus &&
+    prevProps.messagesMap === nextProps.messagesMap
+  );
+});
+
 export default function ChatScreen() {
   const localKeyCacheRef = useRef<{ [messageId: string]: string }>({});
   const { id: friendId, chatType } = useLocalSearchParams();
@@ -411,6 +686,51 @@ export default function ChatScreen() {
   const [groupRoster, setGroupRoster] = useState<any[]>([]);
   const [friend, setFriend] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
+  const [rawHistory, setRawHistory] = useState<any[]>([]);
+  const [isDecryptingBatch, setIsDecryptingBatch] = useState(false);
+  
+  const messageBufferRef = useRef<any[]>([]);
+  const throttleTimerRef = useRef<any>(null);
+
+  const flushMessageBuffer = () => {
+    if (messageBufferRef.current.length === 0) return;
+    
+    const messagesToFlush = [...messageBufferRef.current];
+    messageBufferRef.current = []; // Clear buffer immediately
+    
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setMessages(prevMessages => {
+        let updated = [...prevMessages];
+        let hasChanges = false;
+        
+        for (const newMsg of messagesToFlush) {
+            if (!updated.some(m => m.id === newMsg.id)) {
+                updated = [newMsg, ...updated];
+                hasChanges = true;
+            }
+        }
+        return hasChanges ? updated : prevMessages;
+    });
+  };
+
+  const scheduleFlush = () => {
+      if (!throttleTimerRef.current) {
+          throttleTimerRef.current = setTimeout(() => {
+              flushMessageBuffer();
+              throttleTimerRef.current = null;
+          }, 50);
+      }
+  };
+
+  useEffect(() => {
+    return () => {
+        if (throttleTimerRef.current) {
+            clearTimeout(throttleTimerRef.current);
+            flushMessageBuffer();
+        }
+    };
+  }, []);
+
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
@@ -446,6 +766,19 @@ export default function ChatScreen() {
   const [editingMessage, setEditingMessage] = useState<any>(null);
   const [longPressedMessage, setLongPressedMessage] = useState<any>(null);
   const [showActionsModal, setShowActionsModal] = useState(false);
+
+  const [replyingToMessage, setReplyingToMessage] = useState<any | null>(null);
+  const currentlyOpenSwipeable = useRef<any>(null);
+  const activeSwipeId = useRef<string | null>(null);
+  const inputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    if (replyingToMessage) {
+      InteractionManager.runAfterInteractions(() => {
+        inputRef.current?.focus();
+      });
+    }
+  }, [replyingToMessage]);
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [customAlias, setCustomAlias] = useState<string | null>(null);
@@ -561,10 +894,29 @@ export default function ChatScreen() {
     fetchHistory(groupFlag);
   }, [friendId, chatType, user, keys, masterKey]);
 
-  const handleForwardClick = (attachment: any) => {
+  const handleForwardClick = useCallback((attachment: any) => {
       setForwardingAttachment(attachment);
       setShowForwardModal(true);
-  };
+  }, []);
+
+  const handleLongPress = useCallback((item: any) => {
+    setLongPressedMessage(item);
+    setShowActionsModal(true);
+  }, []);
+
+  const handleSwipeOpen = useCallback((item: any) => {
+    setReplyingToMessage(item);
+  }, []);
+
+  const messagesMap = useMemo(() => {
+    const map: Record<string, any> = {};
+    messages.forEach(m => {
+      if (m.id) {
+        map[String(m.id)] = m;
+      }
+    });
+    return map;
+  }, [messages]);
 
   const executeForward = async (recipientId: string) => {
       if (!stompClient.current?.connected) {
@@ -613,6 +965,26 @@ export default function ChatScreen() {
     
     try {
       setHistoryLoading(true);
+
+      // ⚡ INSTANT SQLITE CACHE LOAD: Prioritize offline-first UX immediately
+      try {
+        const cachedMsgs = await getLocalMessages(String(friendId), 50);
+        if (cachedMsgs.length > 0) {
+          console.log(`⚡ [SQLite Vault] Instant-loaded ${cachedMsgs.length} messages from secure offline cache.`);
+          const mappedCached = cachedMsgs.map(m => ({
+            id: m.serverMessageHash || String(m.id),
+            senderId: m.senderId,
+            content: m.text,
+            attachment: m.attachment,
+            isMe: String(m.senderId) === String(user?.userId) || String(m.senderId) === maskId(String(user?.userId)),
+            time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            timestamp: new Date(m.timestamp).toISOString()
+          }));
+          setMessages(mappedCached.reverse());
+        }
+      } catch (e) {
+        console.warn("⚠️ [LocalDatabase] Error loading cache on init:", e);
+      }
       
       let endpoint = groupFlag
         ? `${API_BASE_URL}/api/v1/groups/${friendId}/messages`
@@ -644,6 +1016,7 @@ export default function ChatScreen() {
         }
 
         console.log(`📦 [Diagnostic] Extracted ${historyArray.length} historical entries for decryption processing.`);
+        setRawHistory(historyArray);
 
         let currentPrivKey = privateKey || privateKeyRef.current;
         if (!currentPrivKey) {
@@ -653,41 +1026,109 @@ export default function ChatScreen() {
         // Process the 15 most recent message objects to maximize UI thread performance
         const recentHistory = historyArray.length > 15 ? historyArray.slice(-15) : historyArray;
 
-        const decryptedHistory = await Promise.all(recentHistory.map(async (m: any) => {
+        const decryptedHistory: any[] = [];
+        for (const m of recentHistory) {
           try {
             const { content, attachment } = await decryptIncomingMessage(m, masterKey, user.userId, localKeyCacheRef.current, currentPrivKey);
-            return {
+            decryptedHistory.push({
               ...m,
               content,
               attachment,
               isMe: String(m.senderId) === String(user?.userId),
               time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            };
+            });
           } catch (e) {
-            return {
+            decryptedHistory.push({
               ...m,
               content: '🔒 [Decryption Failed]',
               attachment: null,
               isMe: String(m.senderId) === String(user?.userId),
               time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            };
+            });
           }
-        }));
+          // ⚡ YIELD THE THREAD: yield to the event loop so the UI rendering stays perfectly smooth at 60 FPS!
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
         
-        setMessages(prev => {
-          const combined = [...decryptedHistory.reverse(), ...prev];
-          return combined.filter((msg, index, self) => 
-            self.findIndex(m => m.id === msg.id) === index
-          );
-        });
+        setMessages(decryptedHistory.reverse());
+
+        // Write-through caching of newly fetched history
+        for (const m of decryptedHistory) {
+          saveLocalMessage({
+            serverMessageHash: m.id,
+            chatId: String(friendId),
+            senderId: String(m.senderId),
+            timestamp: new Date(m.timestamp).getTime(),
+            text: m.content,
+            attachment: m.attachment,
+            isRead: 1
+          }).catch(e => console.error("Failed to write synced msg to local DB:", e));
+        }
       } else {
         console.error('❌ [Diagnostic] Server history request failed with status:', res.status);
-        setMessages([]); 
+        // Do not overwrite local messages on failure to protect offline capability
       }
     } catch (e) {
       console.error('❌ [Diagnostic] Critical failure inside history processing queue:', e);
     } finally {
       setHistoryLoading(false);
+    }
+  };
+
+  const loadMoreHistory = async () => {
+    if (isDecryptingBatch || !keys || !masterKey || !user || rawHistory.length === 0) return;
+    if (messages.length >= rawHistory.length) return;
+
+    try {
+      setIsDecryptingBatch(true);
+      console.log(`🔄 [Pagination] Starting lazy decryption batch. Decrypted: ${messages.length}/${rawHistory.length}`);
+
+      let currentPrivKey = privateKey || privateKeyRef.current;
+      if (!currentPrivKey) {
+        currentPrivKey = await IdentityManager.getPrivateKey(masterKey);
+      }
+
+      const nextBatchSize = 15;
+      const start = Math.max(0, rawHistory.length - messages.length - nextBatchSize);
+      const end = rawHistory.length - messages.length;
+      const nextBatch = rawHistory.slice(start, end);
+
+      const decryptedBatch: any[] = [];
+      for (const m of nextBatch) {
+        try {
+          const { content, attachment } = await decryptIncomingMessage(m, masterKey, user.userId, localKeyCacheRef.current, currentPrivKey);
+          decryptedBatch.push({
+            ...m,
+            content,
+            attachment,
+            isMe: String(m.senderId) === String(user?.userId),
+            time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          });
+        } catch (e) {
+          decryptedBatch.push({
+            ...m,
+            content: '🔒 [Decryption Failed]',
+            attachment: null,
+            isMe: String(m.senderId) === String(user?.userId),
+            time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          });
+        }
+        // ⚡ YIELD THE THREAD: Yield to layout compositor to maintain 60 FPS
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      setMessages(prev => {
+        const combined = [...prev, ...decryptedBatch.reverse()];
+        // De-duplicate defensively
+        return combined.filter((msg, index, self) => 
+          self.findIndex(m => m.id === msg.id) === index
+        );
+      });
+      console.log(`✅ [Pagination] Successfully decrypted and appended 15 more historical messages.`);
+    } catch (e) {
+      console.error('❌ [Pagination] Failed to decrypt historical batch:', e);
+    } finally {
+      setIsDecryptingBatch(false);
     }
   };
 
@@ -849,6 +1290,9 @@ export default function ChatScreen() {
             
             // Activate screen privacy shield
             setIsSessionLocked(true);
+        } else if (nextAppState === 'active') {
+            console.log('☀️ [AppState] App active. Triggering foreground catch-up sync...');
+            fetchHistory(groupFlag);
         }
     };
     const subscriptionAppState = AppState.addEventListener('change', handleAppStateChange);
@@ -913,6 +1357,59 @@ export default function ChatScreen() {
       payload.encryptedContent = payload.encrypted_content;
     }
 
+    if (isMsgGroup && payload.sequenceNumber !== undefined) {
+      // Phase 6 Megolm Engine integration with the UI Fast-Queue
+      enqueueGroupDecryption(payload.groupId || payload.group_id, async () => {
+         const plaintext = await decryptGroupMessageMegolm(
+            payload.groupId || payload.group_id,
+            payload.senderId || payload.sender_id,
+            payload.sequenceNumber,
+            payload.encryptedContent,
+            payload.iv,
+            payload.tag,
+            payload.sessionId
+         );
+         
+         const parsed = JSON.parse(plaintext);
+         return JSON.stringify({
+            content: parsed.text || "",
+            attachment: parsed.attachment || null
+         });
+      }).then((resultStr: any) => {
+          if (!resultStr) return;
+          const result = JSON.parse(resultStr);
+          const newDecryptedMessage = {
+             id: payload.id || Date.now().toString(),
+             senderId: payload.senderId,
+             content: result.content,
+             attachment: result.attachment,
+             isMe: String(payload.senderId) === String(activeUser?.userId),
+             status: payload.status || 'SENT',
+             timestamp: payload.timestamp || new Date().toISOString(),
+             isDeleted: !!payload.deleted || !!payload.isDeleted,
+             isEdited: !!payload.edited || !!payload.isEdited,
+             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          };
+          messageBufferRef.current.push(newDecryptedMessage);
+          scheduleFlush();
+
+          // ⚡ Save incoming live group message to secure offline vault
+          saveLocalMessage({
+             serverMessageHash: newDecryptedMessage.id,
+             chatId: String(friendIdRef.current),
+             senderId: String(newDecryptedMessage.senderId),
+             timestamp: new Date(newDecryptedMessage.timestamp).getTime(),
+             text: newDecryptedMessage.content,
+             attachment: newDecryptedMessage.attachment,
+             isRead: 1
+          }).catch(e => console.error("Failed to write incoming group msg to local DB:", e));
+      }).catch(err => {
+         console.warn("🛡️ [Megolm Engine] Message dropped by queue:", err);
+      });
+      return; // Do not process via legacy RSA
+    }
+
+    // Legacy / 1-to-1 RSA Decryption Fallback
     const { content: decryptedContent, attachment } = await decryptIncomingMessage(payload, activeMasterKey, activeUser.userId, localKeyCacheRef.current, privateKeyRef.current);
 
     const newDecryptedMessage = {
@@ -928,14 +1425,19 @@ export default function ChatScreen() {
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
-    // Bulletproof functional state update with native smooth slide-in for incoming WebSockets:
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setMessages(prevMessages => {
-        // Prevent duplicates if the backend sends it twice
-        if (prevMessages.some(m => m.id === newDecryptedMessage.id)) return prevMessages;
-        // Prepend or append based on your inverted FlatList logic
-        return [newDecryptedMessage, ...prevMessages]; 
-    });
+    messageBufferRef.current.push(newDecryptedMessage);
+    scheduleFlush();
+
+    // ⚡ Save incoming live 1-to-1 message to secure offline vault
+    saveLocalMessage({
+      serverMessageHash: newDecryptedMessage.id,
+      chatId: String(friendIdRef.current),
+      senderId: String(newDecryptedMessage.senderId),
+      timestamp: new Date(newDecryptedMessage.timestamp).getTime(),
+      text: newDecryptedMessage.content,
+      attachment: newDecryptedMessage.attachment,
+      isRead: 1
+    }).catch(e => console.error("Failed to write incoming 1to1 msg to local DB:", e));
 
     // Fire READ receipt if currently viewing the chat
     if (!isMsgGroup) {
@@ -954,6 +1456,13 @@ export default function ChatScreen() {
 
   const handleIncomingRevocation = (payload: any) => {
     const targetId = payload.messageId || payload.id;
+    if (activeSwipeId.current === String(targetId)) {
+      currentlyOpenSwipeable.current = null;
+      activeSwipeId.current = null;
+    }
+    if (replyingToMessage && String(replyingToMessage.id) === String(targetId)) {
+      setReplyingToMessage(null);
+    }
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setMessages(prev => prev.map(m => {
       if (String(m.id) === String(targetId)) {
@@ -1106,6 +1615,13 @@ export default function ChatScreen() {
   const executeRevocation = async (messageId: string) => {
     try {
       setIsUploading(true);
+      if (activeSwipeId.current === String(messageId)) {
+        currentlyOpenSwipeable.current = null;
+        activeSwipeId.current = null;
+      }
+      if (replyingToMessage && String(replyingToMessage.id) === String(messageId)) {
+        setReplyingToMessage(null);
+      }
       const res = await apiFetch(`${API_BASE_URL}/api/v1/messages/${messageId}/revoke`, {
         method: 'DELETE'
       });
@@ -1246,6 +1762,21 @@ export default function ChatScreen() {
                   <Text style={styles.pickerLabel}>Delete for Everyone</Text>
                 </TouchableOpacity>
               </>
+            )}
+
+            {longPressedMessage && !longPressedMessage.isDeleted && (
+              <TouchableOpacity 
+                style={styles.pickerItem} 
+                onPress={() => { 
+                  setShowActionsModal(false); 
+                  setReplyingToMessage(longPressedMessage);
+                }}
+              >
+                <View style={[styles.pickerIcon, { backgroundColor: '#66fcf1' }]}>
+                  <Reply color="#0b0c10" size={20} />
+                </View>
+                <Text style={styles.pickerLabel}>Reply</Text>
+              </TouchableOpacity>
             )}
 
             <TouchableOpacity style={styles.cancelButton} onPress={() => setShowActionsModal(false)}>
@@ -1960,6 +2491,7 @@ export default function ChatScreen() {
       if (selectedFile) {
         // 1. Encrypt the file using the native 8KB streaming module
         const tempEncPath = FileSystem.documentDirectory + selectedFile.name + '.enc';
+        registerActiveTransfer(tempEncPath);
         try {
           const fileAesKey = forge.random.getBytesSync(32);
           const { iv: fileIv } = await encryptFile(selectedFile.uri, tempEncPath, Buffer.from(fileAesKey, 'binary').toString('base64'));
@@ -1985,14 +2517,22 @@ export default function ChatScreen() {
               fetch(tempEncPath).then(r => r.blob()).then(blob => xhr.send(blob));
           });
 
+          const ivParts = fileIv.split(':');
+          const baseIvBase64 = ivParts[0];
+          const fileId = ivParts.length > 1 ? ivParts[1] : fileIv;
+
           attachmentData = {
             url: uploadResponseData.url,
             type: selectedFile.type,
             name: selectedFile.name,
             fileAesKey: Buffer.from(fileAesKey, 'binary').toString('base64'),
-            iv: fileIv
+            baseIv: baseIvBase64,
+            messageId: fileId,
+            expectedFileSize: selectedFile.size,
+            version: 2 // 🚀 INDICATES RAW BINARY STREAM STANDARD
           };
         } finally {
+          deregisterActiveTransfer(tempEncPath);
           try {
             await FileSystem.deleteAsync(tempEncPath, { idempotent: true });
             console.log(`🧹 [Uploader] Cleanly deleted temporary encrypted native file: ${selectedFile.name}`);
@@ -2005,7 +2545,10 @@ export default function ChatScreen() {
       const aesKey = generateAESKey();
       const messagePayloadObj = {
         text: inputMsg,
-        attachment: attachmentData
+        attachment: attachmentData,
+        replyToId: replyingToMessage ? replyingToMessage.id : null,
+        replyToSender: replyingToMessage ? (replyingToMessage.isMe ? "You" : (friend?.username || "Friend")) : null,
+        replyToText: replyingToMessage ? replyingToMessage.content : null
       };
 
       const encryptedData = encryptMessageWithAES(JSON.stringify(messagePayloadObj), aesKey);
@@ -2083,16 +2626,35 @@ export default function ChatScreen() {
 
       // Slide existing list up, ease new bubble in, and morph inputs in a single batched frame
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      const localMsgId = Date.now().toString();
       setMessages((prevMessages) => [{
-        id: Date.now().toString(),
+        id: localMsgId,
         content: inputMsg,
         attachment: attachmentData,
         isMe: true,
         status: 'SENT',
         timestamp: new Date().toISOString(),
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        replyToId: replyingToMessage ? replyingToMessage.id : null,
+        replyToSender: replyingToMessage ? (replyingToMessage.isMe ? "You" : (friend?.username || "Friend")) : null,
+        replyToText: replyingToMessage ? replyingToMessage.content : null
       }, ...prevMessages]);
+
+      // ⚡ Save outgoing message synchronously to SQLite offline vault
+      saveLocalMessage({
+        serverMessageHash: localMsgId,
+        chatId: String(friendId),
+        senderId: String(user?.userId),
+        timestamp: Date.now(),
+        text: inputMsg,
+        attachment: attachmentData,
+        isRead: 1,
+        replyToId: replyingToMessage ? replyingToMessage.id : null,
+        replyToSender: replyingToMessage ? (replyingToMessage.isMe ? "You" : (friend?.username || "Friend")) : null,
+        replyToText: replyingToMessage ? replyingToMessage.content : null
+      }).catch(e => console.error("Failed to write outgoing message to local DB:", e));
       
+      setReplyingToMessage(null);
       setInputMsg('');
       setSelectedFile(null);
       setIsUploading(false);
@@ -2188,27 +2750,12 @@ export default function ChatScreen() {
           data={messages}
           inverted={true}
           extraData={{ friend, groupRoster, messages }}
-          keyExtractor={(item) => item.id || `msg-${Math.random()}`}
+          keyExtractor={(item) => item.id || `msg-${item.timestamp}`}
+          onEndReached={loadMoreHistory}
+          onEndReachedThreshold={0.2}
+          maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
           renderItem={({ item }) => {
             const isMe = item.isMe;
-            if (item.isDeleted || item.is_deleted) {
-              return (
-                <View style={[styles.messageWrapper, isMe ? styles.myMessageWrapper : styles.theirMessageWrapper, { marginVertical: 4, opacity: 0.6 }]}>
-                  <View style={{ backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <ShieldCheck size={14} color="#888" />
-                    <Text style={{ fontStyle: 'italic', color: '#888', fontSize: 11 }}>
-                      This message was deleted for everyone
-                    </Text>
-                  </View>
-                </View>
-              );
-            }
-
-            let clearText = item.content;
-            if (item.isEdited || item.is_edited) {
-              clearText += " (edited)";
-            }
-
             let displayStatus = item.status || 'SENT';
 
             if (isMe) {
@@ -2250,39 +2797,19 @@ export default function ChatScreen() {
             }
 
             return (
-              <TouchableOpacity 
-                activeOpacity={0.8}
-                onLongPress={() => {
-                  if (isMe) {
-                    setLongPressedMessage(item);
-                    setShowActionsModal(true);
-                  }
-                }}
-                style={[styles.messageWrapper, isMe ? styles.myMessageWrapper : styles.theirMessageWrapper]}
-              >
-                <View style={[styles.messageBubble, isMe ? styles.myBubble : styles.theirBubble]}>
-                  {clearText ? (
-                    <Text style={[styles.messageText, isMe ? styles.myText : styles.theirText]}>
-                      {clearText}
-                    </Text>
-                  ) : null}
-                  {item.attachment && <AttachmentViewer attachment={item.attachment} setSelectedImage={setSelectedImage} apiFetch={apiFetch} onForward={handleForwardClick} />}
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: isMe ? 'flex-end' : 'flex-start', marginTop: 4, gap: 4 }}>
-                  <Text style={styles.messageTime}>{item.time}</Text>
-                  {isMe && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      {displayStatus === 'SENT' && <Check color="#555" size={12} />}
-                      {(displayStatus === 'DELIVERED' || displayStatus === 'READ') && (
-                        <View style={{ flexDirection: 'row', marginLeft: -4 }}>
-                          <Check color={displayStatus === 'READ' ? '#00ff88' : '#555'} size={12} />
-                          <Check color={displayStatus === 'READ' ? '#00ff88' : '#555'} size={12} style={{ marginLeft: -8 }} />
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </View>
-              </TouchableOpacity>
+              <MessageRow
+                item={item}
+                isMe={isMe}
+                displayStatus={displayStatus}
+                onLongPress={handleLongPress}
+                onSwipeOpen={handleSwipeOpen}
+                currentlyOpenSwipeableRef={currentlyOpenSwipeable}
+                activeSwipeIdRef={activeSwipeId}
+                setSelectedImage={setSelectedImage}
+                apiFetch={apiFetch}
+                onForward={handleForwardClick}
+                messagesMap={messagesMap}
+              />
             );
           }}
           contentContainerStyle={styles.listContent}
@@ -2316,6 +2843,23 @@ export default function ChatScreen() {
         </View>
       )}
 
+      {replyingToMessage && (
+        <View style={styles.replyPreviewContainer}>
+          <View style={styles.replyPreviewLine} />
+          <View style={{ flex: 1, paddingLeft: 8 }}>
+            <Text style={{ color: '#66fcf1', fontSize: 11, fontWeight: 'bold' }}>
+              Replying to {replyingToMessage.isMe ? "yourself" : (friend?.username || "Friend")}
+            </Text>
+            <Text style={{ color: '#aaa', fontSize: 12 }} numberOfLines={1}>
+              {replyingToMessage.content}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={() => setReplyingToMessage(null)}>
+            <X color="#ff6b6b" size={18} />
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={styles.inputArea}>
         <TouchableOpacity 
           style={styles.attachButton} 
@@ -2324,7 +2868,15 @@ export default function ChatScreen() {
         >
           <Paperclip color="#66fcf1" size={20} />
         </TouchableOpacity>
+        <TouchableOpacity 
+          style={styles.attachButton} 
+          onPress={takePhoto}
+          disabled={isUploading}
+        >
+          <Camera color="#66fcf1" size={20} />
+        </TouchableOpacity>
         <TextInput 
+          ref={inputRef}
           style={styles.input}
           placeholder="Type an encrypted message..."
           placeholderTextColor="#888"
@@ -2612,5 +3164,49 @@ const styles = StyleSheet.create({
     color: '#ff6b6b',
     fontSize: 16,
     fontWeight: '600',
+  },
+  swipeReplyActionContainer: {
+    width: 70,
+    backgroundColor: 'rgba(102, 252, 241, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 18,
+    marginVertical: 4,
+  },
+  quotedMessageBlock: {
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#66fcf1',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    marginBottom: 6,
+    minWidth: 120,
+  },
+  quotedSenderText: {
+    color: '#66fcf1',
+    fontSize: 11,
+    fontWeight: 'bold',
+    marginBottom: 2,
+  },
+  quotedBodyText: {
+    color: '#ccc',
+    fontSize: 12,
+  },
+  replyPreviewContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1f2833',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(102, 252, 241, 0.1)',
+    justifyContent: 'space-between',
+  },
+  replyPreviewLine: {
+    width: 3,
+    height: '100%',
+    backgroundColor: '#66fcf1',
+    borderRadius: 1.5,
   },
 });

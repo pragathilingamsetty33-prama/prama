@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { generateRSAKeyPair, deriveKeyFromPassword, encryptDataWithPassword, decryptDataWithPassword } from '../utils/crypto';
+import { saveVersionedKeysWeb, recoverLatestValidKeyWeb, initVaultDB, runBootGarbageCollector } from '../utils/storageVault';
 import { requestForToken } from '../firebase';
+
 
 const AuthContext = createContext();
 
@@ -11,15 +13,41 @@ export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [keys, setKeys] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [vaultDb, setVaultDb] = useState(null);
+
+    // Initialize custom IndexedDB instance and scavenger non-blockingly on application mount
+    useEffect(() => {
+        initVaultDB()
+            .then((db) => {
+                setVaultDb(db);
+                // Low-priority time-indexed sweeper sweep to wipe stale chunks from persistent memory
+                runBootGarbageCollector(db)
+                    .then(() => console.log('[Storage Core] Scavenger sweep daemon completed background disk audit.'))
+                    .catch((err) => console.error('[Storage Core] Scavenger daemon failed background audit:', err));
+            })
+            .catch((err) => {
+                console.error('[Storage Core] Failed to initialize custom IndexedDB:', err);
+            });
+    }, []);
 
     useEffect(() => {
+        // On page refresh: restore session if password is in sessionStorage
         // On page refresh: restore session if password is in sessionStorage
         const storedUser = localStorage.getItem('prama_auth_user');
         const sessionPwd = localStorage.getItem('session_pwd');
 
         if (storedUser && sessionPwd) {
             const parsedUser = JSON.parse(storedUser);
-            const storedEncryptedKeys = localStorage.getItem(`rsaKeys_${parsedUser.userId}`);
+            const prioritizedVersions = recoverLatestValidKeyWeb(parsedUser.userId);
+            let storedEncryptedKeys = null;
+            let loadedVersion = null;
+
+            if (prioritizedVersions && prioritizedVersions.length > 0) {
+                loadedVersion = prioritizedVersions[0];
+                storedEncryptedKeys = localStorage.getItem(`rsaKeys_${parsedUser.userId}_v${loadedVersion}`);
+            } else {
+                storedEncryptedKeys = localStorage.getItem(`rsaKeys_${parsedUser.userId}`);
+            }
 
             if (storedEncryptedKeys) {
                 (async () => {
@@ -82,7 +110,14 @@ export const AuthProvider = ({ children }) => {
         const derivedKey = await deriveKeyFromPassword(password, data.userId);
 
         // 1. Try local storage
-        const storedEncryptedKeys = localStorage.getItem(`rsaKeys_${data.userId}`);
+        const prioritizedVersions = recoverLatestValidKeyWeb(data.userId);
+        let storedEncryptedKeys = null;
+        if (prioritizedVersions && prioritizedVersions.length > 0) {
+            storedEncryptedKeys = localStorage.getItem(`rsaKeys_${data.userId}_v${prioritizedVersions[0]}`);
+        } else {
+            storedEncryptedKeys = localStorage.getItem(`rsaKeys_${data.userId}`);
+        }
+
         if (storedEncryptedKeys) {
             try {
                 if (onStatusUpdate) onStatusUpdate('Decrypting local keys...');
@@ -132,7 +167,7 @@ export const AuthProvider = ({ children }) => {
         // 4. Store locally and upload to server
         if (onStatusUpdate) onStatusUpdate('Saving secure session...');
         const encryptedKeys = encryptDataWithPassword(JSON.stringify(currentKeys), derivedKey);
-        localStorage.setItem(`rsaKeys_${data.userId}`, JSON.stringify(encryptedKeys));
+        saveVersionedKeysWeb(data.userId, 1, encryptedKeys);
         localStorage.setItem('session_pwd', password);
 
         try {
@@ -169,11 +204,110 @@ export const AuthProvider = ({ children }) => {
         return true;
     };
 
+    const resetIdentity = async (password) => {
+        let currentUser = user;
+        if (!currentUser) {
+            const stored = localStorage.getItem('prama_auth_user');
+            if (stored) currentUser = JSON.parse(stored);
+        }
+        if (!currentUser) throw new Error("No active session to reset E2EE keys");
+
+        const derivedKey = await deriveKeyFromPassword(password, currentUser.userId);
+        const generated = await generateRSAKeyPair();
+
+        const syncRes = await fetch(`${API_BASE}/api/v1/users/sync-key`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + currentUser.accessToken,
+            },
+            body: JSON.stringify({ publicKey: generated.publicKey }),
+        });
+
+        if (!syncRes.ok) throw new Error("Failed to sync new public key");
+
+        const encryptedKeys = encryptDataWithPassword(JSON.stringify(generated), derivedKey);
+        
+        saveVersionedKeysWeb(currentUser.userId, 1, encryptedKeys);
+        localStorage.setItem('session_pwd', password);
+
+        await fetch(`${API_BASE}/api/v1/users/key-bundle`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + currentUser.accessToken,
+            },
+            body: JSON.stringify({ encryptedKeyBundle: JSON.stringify(encryptedKeys) }),
+        });
+
+        setKeys(generated);
+        return generated;
+    };
+
     const logout = () => {
         setUser(null);
         setKeys(null);
         localStorage.removeItem('prama_auth_user');
         localStorage.removeItem('session_pwd');
+    };
+
+    const syncVaultVersionEpoch = async (newVersion, intent) => {
+        const storedUser = localStorage.getItem('prama_auth_user');
+        const sessionPwd = localStorage.getItem('session_pwd');
+
+        if (!storedUser || !sessionPwd) return;
+        const parsedUser = JSON.parse(storedUser);
+
+        const isBreachPath = intent !== 'ROUTINE';
+
+        if (isBreachPath) {
+            // PATH BETA: Sovereign Purge (The Incident Response Kill-Switch)
+            setKeys(null);
+            setUser(null);
+            
+            // Clean localStorage life-lines, EXCEPT the exclusion list
+            const protectedKeys = ['prama_auth_user', 'user', 'session_pwd'];
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && !protectedKeys.includes(k)) {
+                    keysToRemove.push(k);
+                }
+            }
+            keysToRemove.forEach(k => localStorage.removeItem(k));
+            
+            sessionStorage.clear();
+            
+            localStorage.removeItem('prama_auth_user');
+            localStorage.removeItem('session_pwd');
+
+            window.location.href = '/login?reason=session_revoked';
+            return;
+        }
+
+        // PATH ALPHA: Routine Graceful Re-Wrap
+        try {
+            const derivedKey = await deriveKeyFromPassword(sessionPwd, parsedUser.userId);
+            
+            if (keys) {
+                const encryptedBundle = encryptDataWithPassword(JSON.stringify(keys), derivedKey);
+                saveVersionedKeysWeb(parsedUser.userId, newVersion, encryptedBundle);
+                
+                fetch(`${API_BASE}/api/v1/users/key-bundle`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + parsedUser.accessToken,
+                    },
+                    body: JSON.stringify({ encryptedKeyBundle: JSON.stringify(encryptedBundle) })
+                }).catch(console.error);
+                
+                console.log(`[Sync Engine] Successfully executed Graceful Re-Wrap to vault version ${newVersion}`);
+            }
+        } catch (error) {
+            console.error('Graceful Re-Wrap failed:', error);
+            logout();
+        }
     };
 
     const apiFetch = async (url, options = {}) => {
@@ -231,7 +365,7 @@ export const AuthProvider = ({ children }) => {
     };
 
     return (
-        <AuthContext.Provider value={{ user, setUser, keys, login, register, logout, loading, apiFetch }}>
+        <AuthContext.Provider value={{ user, setUser, keys, login, register, logout, loading, apiFetch, syncVaultVersionEpoch, vaultDb, resetIdentity }}>
             {children}
         </AuthContext.Provider>
     );

@@ -15,6 +15,8 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtChannelInterceptor jwtChannelInterceptor;
+    private final com.example.prama.security.WebSocketSessionHolder webSocketSessionHolder;
+    private final WebSocketSubscriptionInterceptor webSocketSubscriptionInterceptor;
 
     @Value("${spring.rabbitmq.host:localhost}")
     private String rabbitHost;
@@ -52,7 +54,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
-        registration.interceptors(jwtChannelInterceptor);
+        registration.interceptors(jwtChannelInterceptor, webSocketSubscriptionInterceptor);
     }
 
     @Override
@@ -61,5 +63,20 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         registration.setMessageSizeLimit(256 * 1024); // 256KB for encrypted packets
         registration.setSendBufferSizeLimit(1024 * 1024);
         registration.setSendTimeLimit(20000);
+
+        registration.addDecoratorFactory(handler -> new org.springframework.web.socket.handler.WebSocketHandlerDecorator(handler) {
+            @Override
+            public void afterConnectionEstablished(org.springframework.web.socket.WebSocketSession session) throws Exception {
+                webSocketSessionHolder.register(session);
+                super.afterConnectionEstablished(session);
+            }
+
+            @Override
+            public void afterConnectionClosed(org.springframework.web.socket.WebSocketSession session, org.springframework.web.socket.CloseStatus closeStatus) throws Exception {
+                webSocketSessionHolder.remove(session.getId());
+                super.afterConnectionClosed(session, closeStatus);
+            }
+        });
     }
+
 }

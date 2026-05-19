@@ -28,6 +28,8 @@ public class UserController {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final com.example.prama.service.AuthService authService;
+    private final org.springframework.messaging.simp.SimpMessagingTemplate messagingTemplate;
 
     @GetMapping("/{id}/public-key")
     public ResponseEntity<String> getUserPublicKey(@PathVariable UUID id) {
@@ -152,6 +154,36 @@ public class UserController {
         }
         
         userRepository.save(user);
+
+        // 🛡️ GLOBAL SESSION EVICTION PROTOCOL
+        // 1. Revoke all active dynamic JWT refresh tokens for this identity
+        try {
+            authService.revokeAllUserJWTTokens(user);
+        } catch (Exception e) {
+            System.err.println("⚠️ [Global Eviction] Failed to revoke user tokens: " + e.getMessage());
+        }
+
+        // 2. Broadcast FORCE_LOGOUT WebSocket notification to other Web sessions
+        try {
+            messagingTemplate.convertAndSendToUser(
+                user.getUsername(),
+                "/topic/identity",
+                Map.of("type", "FORCE_LOGOUT", "message", "Credential matrix rotated globally.")
+            );
+        } catch (Exception e) {
+            System.err.println("⚠️ [Global Eviction] Failed to send Web WebSocket eviction: " + e.getMessage());
+        }
+
+        // 3. Broadcast FORCE_LOGOUT WebSocket notification to other Mobile sessions
+        try {
+            messagingTemplate.convertAndSend(
+                "/topic/messages." + user.getId(),
+                Map.of("type", "FORCE_LOGOUT", "message", "Credential matrix rotated globally.")
+            );
+        } catch (Exception e) {
+            System.err.println("⚠️ [Global Eviction] Failed to send Mobile WebSocket eviction: " + e.getMessage());
+        }
+
         return ResponseEntity.ok(Map.of("success", true, "message", "Password rotated securely."));
     }
 }

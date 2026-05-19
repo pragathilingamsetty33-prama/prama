@@ -115,4 +115,18 @@ public class AuthService {
         }
         return token;
     }
+
+    public int rotateUserPassword(UUID userId, String newPassword) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+        user.setPassword(passwordEncoder.encode(newPassword));
+        user.setVaultVersion(user.getVaultVersion() + 1);
+        userRepository.save(user);
+        return user.getVaultVersion();
+    }
+
+    public void revokeAllUserJWTTokens(User user) {
+        refreshTokenRepository.deleteByUser(user);
+    }
 }
+

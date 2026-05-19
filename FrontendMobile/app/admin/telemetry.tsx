@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   View, 
   Text, 
+  TextInput,
   TouchableOpacity, 
   StyleSheet, 
   ActivityIndicator, 
@@ -19,7 +20,8 @@ import {
   Users, 
   Lock,
   ToggleLeft,
-  ToggleRight
+  ToggleRight,
+  Calendar
 } from 'lucide-react-native';
 import { API_BASE_URL } from '../../constants/Config';
 import { Buffer } from 'buffer';
@@ -31,6 +33,15 @@ export default function AdminTelemetryScreen() {
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
   const [adminGroups, setAdminGroups] = useState<any[]>([]);
   const [togglingUserId, setTogglingUserId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const [metrics, setMetrics] = useState<any>({
+    totalUsers: 0,
+    totalMessages: 0,
+    dbStatus: 'LOADING',
+    rabbitMqStatus: 'LOADING',
+    systemLoad: 'LOADING'
+  });
 
   // Check dynamic role from JWT claim
   let isAdmin = false;
@@ -53,9 +64,10 @@ export default function AdminTelemetryScreen() {
     if (!isAdmin) return;
     setTelemetryLoading(true);
     try {
-      const [usersRes, groupsRes] = await Promise.all([
+      const [usersRes, groupsRes, metricsRes] = await Promise.all([
         apiFetch(`${API_BASE_URL}/api/v1/admin/users?page=0&size=50`),
-        apiFetch(`${API_BASE_URL}/api/v1/admin/groups`)
+        apiFetch(`${API_BASE_URL}/api/v1/admin/groups`),
+        apiFetch(`${API_BASE_URL}/api/v1/admin/metrics`)
       ]);
 
       if (usersRes.ok) {
@@ -64,6 +76,9 @@ export default function AdminTelemetryScreen() {
       }
       if (groupsRes.ok) {
         setAdminGroups(await groupsRes.json());
+      }
+      if (metricsRes.ok) {
+        setMetrics(await metricsRes.json());
       }
     } catch (err) {
       console.warn("Failed to fetch admin telemetry panel data:", err);
@@ -128,7 +143,27 @@ export default function AdminTelemetryScreen() {
       return;
     }
     fetchAdminTelemetry();
+
+    // 10-second high-efficiency auto-polling metrics sync
+    const interval = setInterval(fetchAdminTelemetry, 10000);
+    return () => clearInterval(interval);
   }, [user]);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [searchQuery]);
+
+  const filteredAdminUsers = useMemo(() => {
+    if (!debouncedSearchQuery.trim()) return adminUsers;
+    const lowerQuery = debouncedSearchQuery.toLowerCase();
+    return adminUsers.filter(u => 
+      (u.username && u.username.toLowerCase().includes(lowerQuery)) || 
+      (u.email && u.email.toLowerCase().includes(lowerQuery))
+    );
+  }, [debouncedSearchQuery, adminUsers]);
 
   if (!isAdmin) {
     return (
@@ -162,31 +197,74 @@ export default function AdminTelemetryScreen() {
 
       <ScrollView style={styles.scrollContainer} contentContainerStyle={{ paddingBottom: 40 }}>
         {/* Real-time Telemetry Stats Row */}
-        <Text style={styles.sectionTitle}>📡 SYSTEM TELEMETRY</Text>
+        <Text style={styles.sectionTitle}>📡 SYSTEM TELEMETRY (10s AUTO-REFRESH)</Text>
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
             <Activity color="#66fcf1" size={18} />
-            <Text style={styles.statValue}>12%</Text>
-            <Text style={styles.statLabel}>CPU Load</Text>
+            <Text style={styles.statValue}>{metrics.systemLoad === 'LOADING' ? '...' : metrics.systemLoad}</Text>
+            <Text style={styles.statLabel}>Node Load</Text>
           </View>
           <View style={styles.statCard}>
             <Database color="#66fcf1" size={18} />
-            <Text style={styles.statValue}>1.4 GB</Text>
-            <Text style={styles.statLabel}>Memory</Text>
+            <Text style={styles.statValue}>{metrics.totalMessages}</Text>
+            <Text style={styles.statLabel}>Secure Packets</Text>
           </View>
           <View style={styles.statCard}>
             <Users color="#66fcf1" size={18} />
-            <Text style={styles.statValue}>{adminUsers.length}</Text>
-            <Text style={styles.statLabel}>Active Nodes</Text>
+            <Text style={styles.statValue}>{metrics.totalUsers}</Text>
+            <Text style={styles.statLabel}>Identities</Text>
+          </View>
+        </View>
+
+        {/* Core Infrastructure Health Section */}
+        <Text style={styles.sectionTitle}>🔌 CORE INFRASTRUCTURE HEALTH</Text>
+        <View style={{ gap: 8, marginBottom: 20 }}>
+          <View style={styles.adminListCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.adminCardTitle}>PostgreSQL Database Clusters</Text>
+              <Text style={styles.adminCardSub}>Active connection pool status</Text>
+            </View>
+            <View style={[styles.statusIndicator, metrics.dbStatus === 'HEALTHY' || metrics.dbStatus === 'ACTIVE' || metrics.dbStatus === 'NORMAL' ? styles.statusIndicatorActive : styles.statusIndicatorSuspended]}>
+              <Text style={styles.statusText}>{metrics.dbStatus || 'UNKNOWN'}</Text>
+            </View>
+          </View>
+
+          <View style={styles.adminListCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.adminCardTitle}>RabbitMQ STOMP Broker</Text>
+              <Text style={styles.adminCardSub}>Message subscription routing</Text>
+            </View>
+            <View style={[styles.statusIndicator, metrics.rabbitMqStatus === 'HEALTHY' || metrics.rabbitMqStatus === 'ACTIVE' || metrics.rabbitMqStatus === 'NORMAL' ? styles.statusIndicatorActive : styles.statusIndicatorSuspended]}>
+              <Text style={styles.statusText}>{metrics.rabbitMqStatus || 'UNKNOWN'}</Text>
+            </View>
+          </View>
+
+          <View style={styles.adminListCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.adminCardTitle}>Firebase Cloud Messaging</Text>
+              <Text style={styles.adminCardSub}>Push push-notification alerts pipeline</Text>
+            </View>
+            <View style={[styles.statusIndicator, styles.statusIndicatorActive]}>
+              <Text style={styles.statusText}>ACTIVE</Text>
+            </View>
           </View>
         </View>
 
         {/* Node Registry */}
         <Text style={styles.sectionTitle}>👥 NODE REGISTRY ({adminUsers.length})</Text>
+
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Search by username or email..."
+          placeholderTextColor="#888"
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+        />
+
         {telemetryLoading && adminUsers.length === 0 ? (
           <ActivityIndicator color="#66fcf1" style={{ marginVertical: 20 }} />
         ) : (
-          adminUsers.map((u: any) => {
+          filteredAdminUsers.map((u: any) => {
             const userId = String(u.userId || u.id);
             const isSelf = String(userId) === String(user?.userId);
             const isToggling = togglingUserId === userId;
@@ -207,7 +285,7 @@ export default function AdminTelemetryScreen() {
                     {isSelf && <Text style={styles.selfLabel}>(You)</Text>}
                   </View>
                   <Text style={styles.adminCardSub}>{u.email}</Text>
-                  <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                  <View style={{ flexDirection: 'row', gap: 6, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
                     <View style={[styles.roleBadge, (u.role === 'ROLE_ADMIN' || u.role === 'ADMIN') && styles.roleBadgeAdmin]}>
                       <Text style={[styles.roleText, (u.role === 'ROLE_ADMIN' || u.role === 'ADMIN') && styles.roleTextAdmin]}>
                         {u.role ? u.role.replace('ROLE_', '') : 'USER'}
@@ -215,6 +293,12 @@ export default function AdminTelemetryScreen() {
                     </View>
                     <View style={[styles.statusIndicator, isEnabled ? styles.statusIndicatorActive : styles.statusIndicatorSuspended]}>
                       <Text style={styles.statusText}>{isEnabled ? 'ACTIVE' : 'SUSPENDED'}</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Calendar color="#888" size={11} style={{ marginLeft: 2 }} />
+                      <Text style={{ color: '#888', fontSize: 10 }}>
+                        {u.createdAt ? new Date(u.createdAt).toLocaleDateString() : 'N/A'}
+                      </Text>
                     </View>
                   </View>
                 </View>
@@ -411,5 +495,15 @@ const styles = StyleSheet.create({
     color: '#66fcf1',
     fontSize: 10,
     fontWeight: 'bold',
+  },
+  searchInput: {
+    backgroundColor: 'rgba(31, 40, 51, 0.4)',
+    color: '#fff',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(102, 252, 241, 0.1)',
+    marginBottom: 12,
   }
 });

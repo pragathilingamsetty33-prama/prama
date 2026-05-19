@@ -39,6 +39,7 @@ public class ChatController {
     private final com.example.prama.repository.GroupMessageRepository groupMessageRepository;
     private final com.example.prama.repository.FriendshipRepository friendshipRepository;
     private final NotificationService notificationService;
+    private final com.example.prama.service.MessageService messageService;
 
     // ============================================================================
     // HARDENED NON-NULL COMPLIANT REVOCATION ENDPOINT (UNIVERSAL STRING UUID MAPS)
@@ -198,6 +199,14 @@ public class ChatController {
         messagingTemplate.convertAndSendToUser(rId, "/queue/messages", packet);
         messagingTemplate.convertAndSendToUser(pMsg.getSender().getEmail(), "/queue/messages", packet);
         messagingTemplate.convertAndSendToUser(pMsg.getRecipient().getEmail(), "/queue/messages", packet);
+    }
+
+    @GetMapping("/api/v1/messages/unread-summaries")
+    public ResponseEntity<Map<String, Long>> getUnreadSummaries(org.springframework.security.core.Authentication authentication) {
+        if (authentication == null || !(authentication.getPrincipal() instanceof User currentUser)) {
+            return ResponseEntity.status(401).build();
+        }
+        return ResponseEntity.ok(messageService.getUnreadSummaries(currentUser.getId()));
     }
 
     @GetMapping("/api/v1/messages/{friendId}")

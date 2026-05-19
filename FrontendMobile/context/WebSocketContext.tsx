@@ -28,6 +28,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [unreadCounts, setUnreadCounts] = useState<{ [chatId: string]: number }>({});
   const [activeChatId, setActiveChatIdState] = useState<string | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
+  const deactivateTimeoutRef = useRef<any>(null);
 
   const setActiveChatId = (id: string | null) => {
     setActiveChatIdState(id);
@@ -110,8 +111,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         try {
           const payload = JSON.parse(msg.body);
           
-          if (payload.type === 'SESSION_EVICTED') {
-            console.warn("🚨 [Security Eviction] Received SESSION_EVICTED payload from administrative server!");
+          if (payload.type === 'SESSION_EVICTED' || payload.type === 'FORCE_LOGOUT') {
+            console.warn("🚨 [Security Eviction] Received eviction payload from administrative server!");
             
             // Clear E2EE attachment memory cache instantly
             clearGlobalAttachmentCache();
@@ -120,8 +121,10 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             logout();
             
             Alert.alert(
-              "Access Suspended", 
-              "This device's secure credentials and active session have been revoked by network administration.",
+              "Session Revoked", 
+              payload.type === 'FORCE_LOGOUT' 
+                ? "Core credentials rotated. For your security, this active session has been globally evicted."
+                : "This device's secure credentials and active session have been revoked by network administration.",
               [{ text: "OK" }]
             );
             return;
@@ -172,17 +175,35 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
         console.log('☀️ [AppState] App foregrounded. Waking global socket...');
+        if (deactivateTimeoutRef.current) {
+          clearTimeout(deactivateTimeoutRef.current);
+          deactivateTimeoutRef.current = null;
+          console.log('☀️ [AppState] Cancelled pending socket deactivation (app foregrounded quickly).');
+        }
         NetInfo.fetch().then(state => {
-          if (state.isConnected && stompClientRef.current && !stompClientRef.current.connected) {
-            stompClientRef.current.activate();
+          if (state.isConnected && stompClientRef.current) {
+            console.log('🔌 [AppState] Purging zombie socket descriptors for clean resume...');
+            stompClientRef.current.deactivate().then(() => {
+              console.log('🔌 [AppState] Re-negotiating clean STOMP handshake...');
+              stompClientRef.current?.activate();
+            }).catch(() => {
+              stompClientRef.current?.activate();
+            });
           }
         });
-      } else if (nextAppState.match(/inactive|background/)) {
-        console.log('💤 [AppState] App backgrounded. Deactivating global socket to preserve battery...');
-        if (stompClientRef.current) {
-          stompClientRef.current.deactivate();
+      } else if (nextAppState === 'background') {
+        console.log('💤 [AppState] App backgrounded. Scheduling socket deactivation in 10s...');
+        if (deactivateTimeoutRef.current) {
+          clearTimeout(deactivateTimeoutRef.current);
         }
-        setIsConnected(false);
+        deactivateTimeoutRef.current = setTimeout(() => {
+          console.log('💤 [AppState] Executing scheduled socket deactivation to preserve battery...');
+          if (stompClientRef.current) {
+            stompClientRef.current.deactivate();
+          }
+          setIsConnected(false);
+          deactivateTimeoutRef.current = null;
+        }, 10000);
       }
     };
 
@@ -196,10 +217,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
 
     const netInfoUnsub = NetInfo.addEventListener(state => {
-      if (state.isConnected && stompClientRef.current && !stompClientRef.current.connected) {
-        stompClientRef.current.activate();
+      if (state.isConnected && stompClientRef.current) {
+        if (!stompClientRef.current.active || !stompClientRef.current.connected) {
+          stompClientRef.current.activate();
+        }
       } else if (!state.isConnected && stompClientRef.current) {
-        stompClientRef.current.deactivate();
+        if (stompClientRef.current.active) {
+          stompClientRef.current.deactivate();
+        }
         setIsConnected(false);
       }
     });
@@ -208,6 +233,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       console.log('🧹 [WebSocket] Cleaning up global socket and AppState listeners...');
       appStateSub.remove();
       netInfoUnsub();
+      if (deactivateTimeoutRef.current) {
+        clearTimeout(deactivateTimeoutRef.current);
+      }
       if (stompClientRef.current) {
         stompClientRef.current.deactivate();
       }

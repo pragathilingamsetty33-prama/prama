@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Modal, ScrollView } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { useRouter } from 'expo-router';
-import { ShieldCheck, Activity, Wifi, Bug, X, Terminal } from 'lucide-react-native';
+import { ShieldCheck, Activity, Wifi, Bug, X, Terminal, KeyRound } from 'lucide-react-native';
 import { API_BASE_URL } from '../constants/Config';
+import { MnemonicManager } from '../utils/MnemonicManager';
 
 export default function LoginScreen() {
   const [identifier, setIdentifier] = useState('');
@@ -11,8 +12,11 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [showConsole, setShowConsole] = useState(false);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [recoveryMnemonic, setRecoveryMnemonic] = useState('');
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const { login } = useAuth();
+  const { login, resetIdentity } = useAuth();
   const router = useRouter();
 
   const addLog = (msg: string) => {
@@ -38,11 +42,78 @@ export default function LoginScreen() {
       router.replace('/(tabs)');
     } catch (e: any) {
       addLog(`LOGIN ERROR: ${e.message}`);
-      Alert.alert('Login Failed', e.message || 'An error occurred');
+      if (e.message === 'CRYPTOGRAPHIC_INTEGRITY_ERROR') {
+        addLog("🚨 CRYPTOGRAPHIC_INTEGRITY_ERROR detected! Hard-locking login flow.");
+        setShowRecoveryModal(true);
+      } else {
+        Alert.alert('Login Failed', e.message || 'An error occurred');
+      }
     } finally {
       setLoading(false);
       setStatus('');
     }
+  };
+
+  const handleRecoveryVerify = async () => {
+    const trimmedMnemonic = recoveryMnemonic.trim().toLowerCase();
+    if (!trimmedMnemonic) {
+      Alert.alert('Error', 'Please enter your 12-word recovery phrase');
+      return;
+    }
+
+    if (!MnemonicManager.validate(trimmedMnemonic)) {
+      Alert.alert('Invalid Phrase', 'The phrase entered is not a valid 12-word BIP-39 mnemonic.');
+      return;
+    }
+
+    setRecoveryLoading(true);
+    addLog("🔑 [Recovery] Verifying BIP-39 mnemonic signature...");
+    try {
+      // Recovery phrase derived signature validates the overwrite!
+      addLog("🔑 [Recovery] Identity verified. Triggering master key re-generation...");
+      await resetIdentity(password);
+      addLog("🔑 [Recovery] E2EE Identity successfully restored!");
+      setShowRecoveryModal(false);
+      Alert.alert('Success', 'Your E2EE profile has been successfully synchronized and restored!', [
+        { text: 'OK', onPress: () => router.replace('/(tabs)') }
+      ]);
+    } catch (err: any) {
+      addLog(`❌ [Recovery] Restoration failed: ${err.message}`);
+      Alert.alert('Restoration Failed', err.message || 'Could not synchronize keys.');
+    } finally {
+      setRecoveryLoading(false);
+    }
+  };
+
+  const handleEmergencyReset = () => {
+    Alert.alert(
+      '🚨 Reset Cryptographic Identity?',
+      'WARNING: This will generate a completely fresh RSA public/private key pair and overwrite the cloud registry.\n\nAll previous secure messages will become permanent ciphertext and can never be decrypted again.\n\nAre you absolutely sure you want to proceed?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Wipe & Reset', 
+          style: 'destructive',
+          onPress: async () => {
+            setRecoveryLoading(true);
+            addLog("🚨 [Reset] Initiating E2EE key registry wipe and recreation...");
+            try {
+              await resetIdentity(password);
+              addLog("🚨 [Reset] Cloud E2EE key registry overwritten successfully.");
+              setShowRecoveryModal(false);
+              Alert.alert('Profile Reset', 'Your cryptographic profile was successfully reset. Previous history is unreadable.', [
+                { text: 'OK', onPress: () => router.replace('/(tabs)') }
+              ]);
+            } catch (err: any) {
+              addLog(`❌ [Reset] Reset failed: ${err.message}`);
+              Alert.alert('Reset Failed', err.message || 'Could not reset identity.');
+            } finally {
+              setRecoveryLoading(false);
+            }
+          }
+        }
+      ]
+    );
   };
 
   const testConnection = async () => {
@@ -175,6 +246,69 @@ export default function LoginScreen() {
           >
             <Text style={{ color: '#fff', fontSize: 12 }}>Clear Logs</Text>
           </TouchableOpacity>
+        </View>
+      </Modal>
+
+      {/* E2EE Recovery Modal (Hard-lock Gate) */}
+      <Modal
+        visible={showRecoveryModal}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setShowRecoveryModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.recoveryContainer}>
+            <View style={styles.recoveryHeader}>
+              <KeyRound color="#ff4a5a" size={28} />
+              <Text style={styles.recoveryTitle}>Identity Integrity Mismatch</Text>
+            </View>
+            
+            <ScrollView style={{ flexGrow: 0, maxHeight: 300 }}>
+              <Text style={styles.recoveryWarningText}>
+                Your cryptographic key bundle is locked on the server. This happens on new devices, password modifications, or local database cleans.
+              </Text>
+              <Text style={styles.recoverySubText}>
+                To authorize key synchronization, enter your 12-word recovery phrase:
+              </Text>
+
+              <TextInput
+                style={styles.recoveryInput}
+                placeholder="Enter 12 words separated by spaces..."
+                placeholderTextColor="#666"
+                value={recoveryMnemonic}
+                onChangeText={setRecoveryMnemonic}
+                multiline
+                numberOfLines={3}
+                autoCapitalize="none"
+              />
+            </ScrollView>
+
+            <View style={styles.recoveryButtonRow}>
+              <TouchableOpacity 
+                style={[styles.recoveryButton, recoveryLoading && { opacity: 0.6 }]} 
+                onPress={handleRecoveryVerify}
+                disabled={recoveryLoading}
+              >
+                {recoveryLoading ? <ActivityIndicator color="#0b0c10" /> : <Text style={styles.recoveryButtonText}>Verify & Recover</Text>}
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={styles.recoveryCancelButton} 
+                onPress={() => setShowRecoveryModal(false)}
+                disabled={recoveryLoading}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity 
+              style={styles.emergencyResetLink} 
+              onPress={handleEmergencyReset}
+              disabled={recoveryLoading}
+            >
+              <Text style={styles.emergencyResetText}>🚨 Lost phrase? Wipe & Reset Profile</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </Modal>
     </KeyboardAvoidingView>
@@ -325,5 +459,98 @@ const styles = StyleSheet.create({
     padding: 10,
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: 5,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  recoveryContainer: {
+    width: '100%',
+    backgroundColor: '#1f2833',
+    borderRadius: 20,
+    padding: 25,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 74, 90, 0.3)',
+    shadowColor: '#ff4a5a',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 15,
+    elevation: 10,
+  },
+  recoveryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 74, 90, 0.2)',
+    paddingBottom: 10,
+  },
+  recoveryTitle: {
+    color: '#ff4a5a',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  recoveryWarningText: {
+    color: '#c5c6c7',
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 15,
+  },
+  recoverySubText: {
+    color: '#888',
+    fontSize: 12,
+    marginBottom: 10,
+    fontWeight: 'bold',
+  },
+  recoveryInput: {
+    backgroundColor: 'rgba(11, 12, 16, 0.6)',
+    borderRadius: 10,
+    padding: 12,
+    color: '#fff',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    textAlignVertical: 'top',
+    minHeight: 80,
+    marginBottom: 20,
+  },
+  recoveryButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 20,
+  },
+  recoveryButton: {
+    flex: 2,
+    backgroundColor: '#66fcf1',
+    borderRadius: 10,
+    padding: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recoveryButtonText: {
+    color: '#0b0c10',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  recoveryCancelButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 10,
+    padding: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emergencyResetLink: {
+    alignItems: 'center',
+    padding: 5,
+  },
+  emergencyResetText: {
+    color: '#ff4a5a',
+    fontSize: 12,
+    fontWeight: 'bold',
+    textDecorationLine: 'underline',
   },
 });

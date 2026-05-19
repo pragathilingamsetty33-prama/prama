@@ -14,10 +14,11 @@ export const unstable_settings = {
 
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
-import { Platform, View, ActivityIndicator } from 'react-native';
+import { AppState, AppStateStatus, Platform, View, ActivityIndicator } from 'react-native';
+import { runStorageScavengerSweep } from '../utils/StorageScavenger';
 
 if (Platform.OS !== 'web') {
-  SplashScreen.preventAutoHideAsync();
+  SplashScreen.preventAutoHideAsync().catch(console.error);
 }
 
 function RootLayoutContent() {
@@ -29,6 +30,22 @@ function RootLayoutContent() {
       SplashScreen.hideAsync().catch(console.error);
     }
   }, [loading]);
+
+  useEffect(() => {
+    // 🧹 Operation 3 Scavenger daemon: Cold boot sweep
+    runStorageScavengerSweep().catch(console.error);
+
+    // Bind daemon sweep to React Native AppState hot-resume transitions
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        runStorageScavengerSweep().catch(console.error);
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -54,11 +71,11 @@ function RootLayoutContent() {
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <WebSocketProvider>
-        <ToastProvider>
+      <ToastProvider>
+        <WebSocketProvider>
           <RootLayoutContent />
-        </ToastProvider>
-      </WebSocketProvider>
+        </WebSocketProvider>
+      </ToastProvider>
     </AuthProvider>
   );
 }

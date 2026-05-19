@@ -1,19 +1,147 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, TextInput, Modal, ScrollView } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, TextInput, Modal, ScrollView, Image } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import { useRouter } from 'expo-router';
 import { Users, Bell, LogOut, Cloud, User, UserPlus, Check, Plus, ShieldAlert } from 'lucide-react-native';
 import { API_BASE_URL } from '../../constants/Config';
 import { useWebSocket } from '../../context/WebSocketContext';
 import { Buffer } from 'buffer';
-import { generateAESKey, encryptAESKeyWithRSA } from '../../utils/crypto';
+import { generateAESKey, encryptAESKeyWithRSA, deriveKeyFromPassword, encryptDataWithPassword } from '../../utils/crypto';
 import forge from 'node-forge';
+import * as ImagePicker from 'expo-image-picker';
 
 export default function ChatsScreen() {
-  const { user, apiFetch, logout, syncKeysToServer, loading: authLoading } = useAuth();
+  const { user, keys, apiFetch, logout, syncKeysToServer, loading: authLoading, updateProfile, updateAvatar } = useAuth();
   const { unreadCounts, fetchUnreadSummaries } = useWebSocket();
   const router = useRouter();
   
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileUsername, setProfileUsername] = useState("");
+  const [profileEmail, setProfileEmail] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [isUpdatingMetadata, setIsUpdatingMetadata] = useState(false);
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      setProfileUsername(user.username || "");
+      setProfileEmail(user.email || "");
+    }
+  }, [user]);
+
+  const handlePickAvatar = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Gallery permission is required to update your avatar.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.5,
+        allowsEditing: true,
+        aspect: [1, 1],
+        base64: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets[0].base64) {
+        setIsUploadingAvatar(true);
+        const base64Img = `data:image/jpeg;base64,${result.assets[0].base64}`;
+
+        const res = await apiFetch(`/api/v1/users/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ avatar: base64Img }),
+        });
+
+        if (res.ok) {
+          await updateAvatar(base64Img);
+          Alert.alert('Success', 'Profile picture updated successfully!');
+        } else {
+          throw new Error(await res.text());
+        }
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update avatar.');
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  };
+
+  const handleUpdateMetadata = async () => {
+    if (!profileUsername.trim() || !profileEmail.trim()) {
+      Alert.alert("Error", "Username and Email are required.");
+      return;
+    }
+    setIsUpdatingMetadata(true);
+    try {
+      const res = await apiFetch(`${API_BASE_URL}/api/v1/users/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: profileUsername.trim(), email: profileEmail.trim() }),
+      });
+      if (res.ok) {
+        await updateProfile(profileUsername.trim(), profileEmail.trim());
+        Alert.alert("Success", "System credentials updated successfully.");
+      } else {
+        throw new Error(await res.text());
+      }
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to update profile credentials.");
+    } finally {
+      setIsUpdatingMetadata(false);
+    }
+  };
+
+  const handleUpdatePassword = async () => {
+    if (!currentPassword || !newPassword) {
+      Alert.alert("Error", "All authorization password blocks are required.");
+      return;
+    }
+    if (!keys || !user) {
+      Alert.alert("Error", "Cryptographic identity not fully loaded or active.");
+      return;
+    }
+    setIsUpdatingPassword(true);
+    try {
+      const newMasterKey = await deriveKeyFromPassword(newPassword, user.userId);
+      const encryptedKeys = encryptDataWithPassword(JSON.stringify(keys), newMasterKey);
+      const encryptedKeyBundleStr = JSON.stringify(encryptedKeys);
+
+      const res = await apiFetch(`${API_BASE_URL}/api/v1/users/password`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentPassword,
+          newPassword,
+          encryptedKeyBundle: encryptedKeyBundleStr
+        })
+      });
+
+      if (res.ok) {
+        Alert.alert(
+          "Success",
+          "Password matrix and cryptographic bundle rotated securely. You will now be logged out.",
+          [{ text: "OK", onPress: () => {
+            setShowProfileModal(false);
+            setCurrentPassword("");
+            setNewPassword("");
+            logout();
+          }}]
+        );
+      } else {
+        throw new Error(await res.text());
+      }
+    } catch (err: any) {
+      Alert.alert("Authentication Failed", err.message || "Failed to update or rotate secure password.");
+    } finally {
+      setIsUpdatingPassword(false);
+    }
+  };
+
   // Extended 4-way top tab state layout
   const [activeTab, setActiveTab] = useState<'friends' | 'groups' | 'add' | 'requests'>('friends');
   
@@ -176,6 +304,113 @@ export default function ChatsScreen() {
               <Text style={{ color: '#0b0c10', fontWeight: 'bold', fontSize: 16 }}>Create Secure Room</Text>
             )}
           </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const ProfileModalUI = () => (
+    <Modal
+      visible={showProfileModal}
+      transparent={true}
+      animationType="slide"
+      onRequestClose={() => setShowProfileModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={[styles.pickerContainer, { maxHeight: '90%', padding: 20 }]}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, width: '100%' }}>
+            <Text style={styles.modalTitle}>Personal Profile</Text>
+            <TouchableOpacity onPress={() => setShowProfileModal(false)}>
+              <Text style={{ color: '#66fcf1', fontWeight: 'bold' }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ width: '100%' }} contentContainerStyle={{ alignItems: 'center' }} showsVerticalScrollIndicator={false}>
+            {/* Avatar Section */}
+            <TouchableOpacity onPress={handlePickAvatar} disabled={isUploadingAvatar} style={{ marginBottom: 20, alignItems: 'center' }}>
+              {isUploadingAvatar ? (
+                <ActivityIndicator size="large" color="#66fcf1" style={{ marginVertical: 30 }} />
+              ) : user?.avatar ? (
+                <Image source={{ uri: user.avatar }} style={{ width: 100, height: 100, borderRadius: 50, borderWidth: 2, borderColor: '#66fcf1' }} />
+              ) : (
+                <View style={{ width: 100, height: 100, borderRadius: 50, backgroundColor: '#45a29e', justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#66fcf1' }}>
+                  <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#0b0c10' }}>
+                    {user?.username?.charAt(0)?.toUpperCase()}
+                  </Text>
+                </View>
+              )}
+              <Text style={{ color: '#66fcf1', fontSize: 12, marginTop: 8, fontWeight: 'bold' }}>Tap to Change Avatar</Text>
+            </TouchableOpacity>
+
+            {/* Core Metadata Form */}
+            <Text style={{ color: '#45a29e', fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase', alignSelf: 'flex-start', marginBottom: 8 }}>Global Profile Credentials</Text>
+            
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Username"
+              placeholderTextColor="#888"
+              value={profileUsername}
+              onChangeText={setProfileUsername}
+              autoCapitalize="none"
+            />
+
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Email Address"
+              placeholderTextColor="#888"
+              value={profileEmail}
+              onChangeText={setProfileEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+            />
+
+            <TouchableOpacity 
+              style={[styles.modalButton, { marginBottom: 25 }]} 
+              onPress={handleUpdateMetadata}
+              disabled={isUpdatingMetadata}
+            >
+              {isUpdatingMetadata ? (
+                <ActivityIndicator color="#0b0c10" />
+              ) : (
+                <Text style={{ color: '#0b0c10', fontWeight: 'bold', fontSize: 15 }}>Update Core Metadata</Text>
+              )}
+            </TouchableOpacity>
+
+            {/* Security Credential Rotation Form */}
+            <Text style={{ color: '#ff6b6b', fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase', alignSelf: 'flex-start', marginBottom: 8, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)', paddingTop: 15, width: '100%' }}>Rotate Security Credentials</Text>
+            
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Current Secure Password"
+              placeholderTextColor="#888"
+              value={currentPassword}
+              onChangeText={setCurrentPassword}
+              secureTextEntry
+              autoCapitalize="none"
+            />
+
+            <TextInput
+              style={styles.modalInput}
+              placeholder="New Secure Password"
+              placeholderTextColor="#888"
+              value={newPassword}
+              onChangeText={setNewPassword}
+              secureTextEntry
+              autoCapitalize="none"
+            />
+
+            <TouchableOpacity 
+              style={[styles.modalButton, { backgroundColor: '#ff6b6b' }]} 
+              onPress={handleUpdatePassword}
+              disabled={isUpdatingPassword}
+            >
+              {isUpdatingPassword ? (
+                <ActivityIndicator color="#0b0c10" />
+              ) : (
+                <Text style={{ color: '#0b0c10', fontWeight: 'bold', fontSize: 15 }}>Rotate Key Matrix</Text>
+              )}
+            </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -366,7 +601,22 @@ export default function ChatsScreen() {
     <View style={styles.container}>
       {/* Main Header bar */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Prama Chats</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <TouchableOpacity onPress={() => setShowProfileModal(true)} disabled={isUploadingAvatar}>
+            {isUploadingAvatar ? (
+              <ActivityIndicator size="small" color="#66fcf1" />
+            ) : user?.avatar ? (
+              <Image source={{ uri: user.avatar }} style={styles.headerAvatar} />
+            ) : (
+              <View style={[styles.headerAvatar, { backgroundColor: '#45a29e', justifyContent: 'center', alignItems: 'center' }]}>
+                <Text style={styles.headerAvatarText}>
+                  {user?.username?.charAt(0)?.toUpperCase()}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Prama Chats</Text>
+        </View>
         <View style={{ flexDirection: 'row', gap: 15, alignItems: 'center' }}>
           {isAdmin && (
             <TouchableOpacity onPress={() => router.push('/admin/telemetry' as any)}>
@@ -459,6 +709,7 @@ export default function ChatsScreen() {
       )}
 
       <CreateGroupModalUI />
+      <ProfileModalUI />
     </View>
   );
 }
@@ -467,6 +718,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0b0c10' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, paddingTop: 60, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
   headerTitle: { fontSize: 24, fontWeight: 'bold', color: '#66fcf1' },
+  headerAvatar: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  headerAvatarText: { fontSize: 16, fontWeight: 'bold', color: '#0b0c10' },
   tabRowContainer: { flexDirection: 'row', paddingHorizontal: 10, paddingVertical: 12, gap: 5, backgroundColor: 'rgba(0,0,0,0.2)' },
   tabButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 20, backgroundColor: 'rgba(31, 40, 51, 0.3)', borderWidth: 1, borderColor: 'rgba(102, 252, 241, 0.05)' },
   activeTabButton: { backgroundColor: '#66fcf1', borderColor: '#66fcf1' },

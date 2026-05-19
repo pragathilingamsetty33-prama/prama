@@ -130,6 +130,17 @@ const Login = () => {
                         {isLogin ? 'Sign up' : 'Sign in'}
                     </button>
                 </div>
+                {isLogin && (
+                    <div style={{ marginTop: '12px', fontSize: '13px' }}>
+                        <button 
+                            type="button" 
+                            onClick={() => navigate('/recovery')}
+                            style={{ background: 'none', border: 'none', color: '#ff4a5a', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontWeight: '500' }}
+                        >
+                            Recover Cryptographic Profile
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );

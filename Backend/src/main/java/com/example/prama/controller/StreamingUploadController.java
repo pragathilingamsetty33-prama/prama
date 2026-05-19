@@ -25,15 +25,19 @@ public class StreamingUploadController {
      */
     @PostMapping
     public ResponseEntity<?> upload(HttpServletRequest request,
-                                    @RequestHeader("X-File-ID") String fileId,
-                                    @RequestHeader("X-Chunk-Index") int chunkIndex,
-                                    @RequestHeader("X-Total-Chunks") int totalChunks,
+                                    @RequestHeader(value = "X-File-ID", required = false) String fileId,
+                                    @RequestHeader(value = "X-Chunk-Index", required = false, defaultValue = "0") int chunkIndex,
+                                    @RequestHeader(value = "X-Total-Chunks", required = false, defaultValue = "1") int totalChunks,
                                     @RequestHeader("X-File-Name") String fileName,
                                     @RequestHeader("X-Sender-Id") String senderId) {
         try {
+            String activeFileId = (fileId == null || fileId.trim().isEmpty())
+                    ? java.util.UUID.randomUUID().toString()
+                    : fileId;
+
             String result = fileStorageService.appendStream(
                     request.getInputStream(), 
-                    fileId, 
+                    activeFileId, 
                     chunkIndex, 
                     totalChunks, 
                     fileName, 

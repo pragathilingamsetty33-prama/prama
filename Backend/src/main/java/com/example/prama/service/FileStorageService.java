@@ -2,13 +2,18 @@ package com.example.prama.service;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
 
 import java.io.FileOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.StandardCopyOption;
 import java.util.UUID;
 
@@ -63,5 +68,38 @@ public class FileStorageService {
 
     private void saveMetadata(String storedPath, String originalName, String senderId) {
         // TODO: Implement JPA repository call here
+    }
+
+    public Resource loadFileAsResource(String filename) throws FileNotFoundException, IOException {
+        if (filename == null || filename.contains("/") || filename.contains("\\") || filename.contains("..")) {
+            throw new SecurityException("Access Denied: Malformed filename parameter containing path delimiters.");
+        }
+
+        try {
+            Path baseDirectory = Paths.get(uploadDir).toRealPath();
+            Path targetFilePath = baseDirectory.resolve(filename).toRealPath();
+
+            if (!targetFilePath.startsWith(baseDirectory)) {
+                throw new SecurityException("Access Denied: True physical path lies outside the storage vault.");
+            }
+
+            Resource resource = new UrlResource(targetFilePath.toUri());
+            if (resource.exists() && resource.isReadable()) {
+                return resource;
+            } else {
+                throw new FileNotFoundException("Attachment file not found on disk: " + filename);
+            }
+        } catch (NoSuchFileException | FileNotFoundException e) {
+            throw new FileNotFoundException("Target file does not exist: " + filename);
+        } catch (MalformedURLException e) {
+            throw new IOException("Malformed URL mapping resolved for path.", e);
+        }
+    }
+
+    public String storeFile(InputStream inputStream, String originalFilename) throws IOException {
+        Path rootPath = Paths.get(uploadDir).toRealPath();
+        String filename = java.util.UUID.randomUUID().toString() + "_" + originalFilename;
+        Files.copy(inputStream, rootPath.resolve(filename), StandardCopyOption.REPLACE_EXISTING);
+        return filename;
     }
 }

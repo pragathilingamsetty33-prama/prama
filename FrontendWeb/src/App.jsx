@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Login from './pages/Login';
 import Chat from './pages/Chat';
+import Recovery from './pages/Recovery';
 import AdminRoutes from './pages/admin/AdminRoutes';
 import AdminLayout from './pages/admin/AdminLayout';
 import AdminDashboard from './pages/admin/AdminDashboard';
@@ -23,6 +24,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Login />} />
           <Route path="/login" element={<Navigate to="/" />} />
+          <Route path="/recovery" element={<Recovery />} />
           
           <Route path="/chat" element={
             <ProtectedRoute>

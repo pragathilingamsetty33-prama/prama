@@ -20,4 +20,7 @@ export function encryptFileWithAES(arrayBuffer: ArrayBuffer, aesKey: string): {
   ciphertext: string;
   tag: string;
 };
-export function decryptFileWithAES(encryptedData: any, aesKey: any): ArrayBuffer;
+export function decryptFileWithAES(encryptedData: any, aesKey: any, aad?: string): ArrayBuffer;
+export function hkdfSha256(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, length?: number): Uint8Array;
+export function deriveGroupRatchetStep(ratchetKey: Uint8Array, sessionId: string): Promise<Uint8Array>;
+export function deriveGroupMessageKey(ratchetKey: Uint8Array, sessionId: string): Promise<Uint8Array>;
