@@ -20,7 +20,7 @@ import java.util.UUID;
 @Service
 public class FileStorageService {
 
-    @Value("${app.upload.dir:C:/Users/Mani/OneDrive/Desktop/prama/uploads/}")
+    @Value("${app.upload.dir:./uploads/}")
     private String uploadDir;
 
     /**

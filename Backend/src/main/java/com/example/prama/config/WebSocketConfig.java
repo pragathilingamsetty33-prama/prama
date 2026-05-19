@@ -27,6 +27,9 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Value("${spring.rabbitmq.password:guest}")
     private String rabbitPass;
 
+    @Value("${spring.rabbitmq.virtual-host:/}")
+    private String rabbitVirtualHost;
+
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         // 🚀 THE MODERN STANDARD: A single, unified pure WebSocket endpoint for all clients
@@ -46,7 +49,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 .setSystemPasscode(rabbitPass)
                 .setSystemHeartbeatSendInterval(10000)
                 .setSystemHeartbeatReceiveInterval(10000)
-                .setVirtualHost("/");
+                .setVirtualHost(rabbitVirtualHost);
 
         registry.setApplicationDestinationPrefixes("/app");
         registry.setUserDestinationPrefix("/user");
