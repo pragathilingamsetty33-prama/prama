@@ -110,7 +110,30 @@ const decryptIncomingMessage = async (m: any, masterKey: Uint8Array, currentUser
             localCacheRef[msgId] = aesKeyStr as string; // Save to memory cache
           }
         } catch (rsaErr: any) {
-          throw rsaErr;
+          // 🚀 CRYPTOGRAPHIC EPOCH FALLBACK: Active key failed, search local SQLite history
+          try {
+            const { getLocalKeyHistoryStore } = require('../../utils/LocalDatabase');
+            const historyMap = await getLocalKeyHistoryStore();
+            let fallbackDecrypted = false;
+
+            for (const [fingerprint, oldPrivateKeyPem] of historyMap.entries()) {
+              try {
+                aesKeyStr = decryptAESKeyWithRSA(aesKeyToUse, oldPrivateKeyPem);
+                if (msgId !== 'UNKNOWN') {
+                  localCacheRef[msgId] = aesKeyStr as string; // Cache the successful key string
+                }
+                fallbackDecrypted = true;
+                console.log(`💚 [E2EE Decrypt] Successfully decrypted historical entry using old key [FP: ${fingerprint}]`);
+                break;
+              } catch (e) {}
+            }
+
+            if (!fallbackDecrypted) {
+              throw rsaErr;
+            }
+          } catch (fallbackErr) {
+            throw rsaErr; // Bubble up original RSA error
+          }
         }
       }
 
@@ -1054,15 +1077,19 @@ export default function ChatScreen() {
 
         // Write-through caching of newly fetched history
         for (const m of decryptedHistory) {
-          saveLocalMessage({
-            serverMessageHash: m.id,
-            chatId: String(friendId),
-            senderId: String(m.senderId),
-            timestamp: new Date(m.timestamp).getTime(),
-            text: m.content,
-            attachment: m.attachment,
-            isRead: 1
-          }).catch(e => console.error("Failed to write synced msg to local DB:", e));
+          try {
+            await saveLocalMessage({
+              serverMessageHash: m.id,
+              chatId: String(friendId),
+              senderId: String(m.senderId),
+              timestamp: new Date(m.timestamp).getTime(),
+              text: m.content,
+              attachment: m.attachment,
+              isRead: 1
+            });
+          } catch (e) {
+            console.error("Failed to write synced msg to local DB:", e);
+          }
         }
       } else {
         console.error('❌ [Diagnostic] Server history request failed with status:', res.status);

@@ -16,7 +16,7 @@ export default function LoginScreen() {
   const [recoveryMnemonic, setRecoveryMnemonic] = useState('');
   const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const { login, resetIdentity } = useAuth();
+  const { login, resetIdentity, logout } = useAuth();
   const router = useRouter();
 
   const addLog = (msg: string) => {
@@ -294,7 +294,10 @@ export default function LoginScreen() {
 
               <TouchableOpacity 
                 style={styles.recoveryCancelButton} 
-                onPress={() => setShowRecoveryModal(false)}
+                onPress={() => {
+                  logout();
+                  setShowRecoveryModal(false);
+                }}
                 disabled={recoveryLoading}
               >
                 <Text style={{ color: '#fff', fontWeight: 'bold' }}>Cancel</Text>

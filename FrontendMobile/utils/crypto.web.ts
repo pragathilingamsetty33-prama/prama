@@ -127,7 +127,8 @@ export const decryptAESKeyWithRSA = (encryptedAESKey64: string, privateKeyPem: s
 
 export const encryptMessageWithAES = (message: string, aesKey: string) => {
     const iv = forge.random.getBytesSync(12);
-    const cipher = forge.cipher.createCipher('AES-GCM', aesKey);
+    const keyBuffer = forge.util.createBuffer(Buffer.from(aesKey, typeof aesKey === 'string' && aesKey.length !== 32 ? 'base64' : 'binary'));
+    const cipher = forge.cipher.createCipher('AES-GCM', keyBuffer);
     cipher.start({ iv });
     cipher.update(forge.util.createBuffer(message, 'utf8'));
     cipher.finish();
@@ -141,7 +142,8 @@ export const encryptMessageWithAES = (message: string, aesKey: string) => {
 export const decryptMessageWithAES = (encryptedData: any, aesKey: string) => {
     const cipherTxt = encryptedData.ciphertext || encryptedData.cipherText;
     const { iv, tag } = encryptedData;
-    const decipher = forge.cipher.createDecipher('AES-GCM', aesKey);
+    const keyBuffer = forge.util.createBuffer(Buffer.from(aesKey, typeof aesKey === 'string' && aesKey.length !== 32 ? 'base64' : 'binary'));
+    const decipher = forge.cipher.createDecipher('AES-GCM', keyBuffer);
     decipher.start({
         iv: forge.util.decode64(iv),
         tag: forge.util.createBuffer(forge.util.decode64(tag))
@@ -155,7 +157,8 @@ export const decryptMessageWithAES = (encryptedData: any, aesKey: string) => {
 
 export const encryptFileWithAES = (arrayBuffer: ArrayBuffer, aesKey: string) => {
     const iv = forge.random.getBytesSync(12);
-    const cipher = forge.cipher.createCipher('AES-GCM', aesKey);
+    const keyBuffer = forge.util.createBuffer(Buffer.from(aesKey, typeof aesKey === 'string' && aesKey.length !== 32 ? 'base64' : 'binary'));
+    const cipher = forge.cipher.createCipher('AES-GCM', keyBuffer);
     cipher.start({ iv });
     cipher.update(forge.util.createBuffer(Buffer.from(arrayBuffer)));
     cipher.finish();

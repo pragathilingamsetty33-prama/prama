@@ -1,0 +1,83 @@
+name: Build and Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+
+# Cancel any previous workflow runs that are still active when you push a new commit
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- 1. BUILD BACKEND ---
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build Backend JAR
+        run: |
+          cd Backend
+          mvn clean package -DskipTests
+
+      # --- 2. BUILD FRONTEND ---
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: FrontendWeb/package-lock.json
+
+      - name: Build Frontend Web
+        run: |
+          cd FrontendWeb
+          npm ci
+          npm run build
+
+      # --- 3. COPY BUILD OUTPUTS TO VM ---
+      - name: Copy files to Azure VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 104.208.70.211
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "Backend/target/*.jar,FrontendWeb/dist/**"
+          target: "/home/${{ secrets.VM_USER }}/deploy-temp"
+
+      # --- 4. EXECUTE REMOTE COMMANDS (KILL OLD PROCESS & START NEW) ---
+      - name: Restart Backend & Frontend on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 104.208.70.211
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Kill any active process running on port 8080 (the old backend)
+            sudo fuser -k 8080/tcp || true
+
+            # Prepare backend folder and move new JAR
+            mkdir -p /home/${{ secrets.VM_USER }}/backend
+            mv -f /home/${{ secrets.VM_USER }}/deploy-temp/Backend/target/*.jar /home/${{ secrets.VM_USER }}/backend/app.jar
+
+            # Launch the new backend JAR in the background
+            cd /home/${{ secrets.VM_USER }}/backend
+            nohup java -jar app.jar > app.log 2>&1 &
+
+            # Replace Nginx frontend files in /var/www/html
+            sudo mkdir -p /var/www/html
+            sudo rm -rf /var/www/html/*
+            sudo cp -r /home/${{ secrets.VM_USER }}/deploy-temp/FrontendWeb/dist/* /var/www/html/
+
+            # Clean up temp folder
+            rm -rf /home/${{ secrets.VM_USER }}/deploy-temp

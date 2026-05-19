@@ -68,13 +68,15 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // Seed initial unread summaries from REST backend
     fetchUnreadSummaries();
 
-    const wsUrl = `${API_BASE_URL}/ws`.replace('http://', 'ws://').replace('https://', 'wss://');
+    const wsUrl = `${API_BASE_URL}/ws`
+      .replace('http://', 'ws://')
+      .replace('https://', 'wss://');
     console.log('📡 [WebSocket] Initializing global STOMP client...');
 
     const client = new Client({
       brokerURL: wsUrl,
       reconnectDelay: 5000,
-      webSocketFactory: () => new WebSocket(wsUrl),
+      webSocketFactory: () => new WebSocket(wsUrl, ['v10.stomp', 'v11.stomp', 'v12.stomp']),
       heartbeatIncoming: 10000,
       heartbeatOutgoing: 10000,
       connectHeaders: {
@@ -178,21 +180,20 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         if (deactivateTimeoutRef.current) {
           clearTimeout(deactivateTimeoutRef.current);
           deactivateTimeoutRef.current = null;
-          console.log('☀️ [AppState] Cancelled pending socket deactivation (app foregrounded quickly).');
+          console.log('☀️ [AppState] Cancelled pending socket deactivation (quick return).');
+        } else {
+          // The socket was actually deactivated (the 5s grace period ended)
+          NetInfo.fetch().then(state => {
+            if (state.isConnected && stompClientRef.current) {
+              if (!stompClientRef.current.active || !stompClientRef.current.connected) {
+                console.log('🔌 [AppState] Activating STOMP client after background deactivation...');
+                stompClientRef.current.activate();
+              }
+            }
+          });
         }
-        NetInfo.fetch().then(state => {
-          if (state.isConnected && stompClientRef.current) {
-            console.log('🔌 [AppState] Purging zombie socket descriptors for clean resume...');
-            stompClientRef.current.deactivate().then(() => {
-              console.log('🔌 [AppState] Re-negotiating clean STOMP handshake...');
-              stompClientRef.current?.activate();
-            }).catch(() => {
-              stompClientRef.current?.activate();
-            });
-          }
-        });
       } else if (nextAppState === 'background') {
-        console.log('💤 [AppState] App backgrounded. Scheduling socket deactivation in 10s...');
+        console.log('💤 [AppState] App backgrounded. Scheduling socket deactivation in 5s...');
         if (deactivateTimeoutRef.current) {
           clearTimeout(deactivateTimeoutRef.current);
         }
@@ -203,7 +204,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           }
           setIsConnected(false);
           deactivateTimeoutRef.current = null;
-        }, 10000);
+        }, 5000); // 5-second grace period
       }
     };
 

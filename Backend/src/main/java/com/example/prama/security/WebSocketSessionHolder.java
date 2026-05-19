@@ -24,4 +24,8 @@ public class WebSocketSessionHolder {
             sessions.remove(sessionId);
         }
     }
+
+    public ConcurrentHashMap<String, WebSocketSession> getActiveSessions() {
+        return sessions;
+    }
 }

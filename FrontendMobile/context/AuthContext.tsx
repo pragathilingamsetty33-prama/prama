@@ -8,6 +8,8 @@ import { API_BASE_URL } from '../constants/Config';
 import { Buffer } from 'buffer';
 import { clearGlobalAttachmentCache } from '../utils/AttachmentCache';
 import * as Notifications from 'expo-notifications';
+import { saveLocalKey } from '../utils/LocalDatabase';
+import forge from 'node-forge';
 
 interface User {
   userId: string;
@@ -70,6 +72,21 @@ const deleteSecureItemAsync = async (key: string) => {
   }
   await SecureStore.deleteItemAsync(key);
 };
+
+const computeSHA256Fingerprint = (pem: string): string => {
+  if (!pem) return "";
+  try {
+    const cleanPem = pem.replace(/-----BEGIN[^-]+-----|-----END[^-]+-----|\r|\n|\s/g, "");
+    const md = forge.md.sha256.create();
+    md.update(forge.util.decode64(cleanPem));
+    const hex = md.digest().toHex().toUpperCase();
+    return hex.match(/.{1,4}/g)?.join(':') || hex;
+  } catch (err) {
+    console.warn("Fingerprint hashing failed:", err);
+    return "UNKNOWN FINGERPRINT";
+  }
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [keys, setKeys] = useState<Keys | null>(null);
@@ -317,6 +334,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let localKeysFound = (storedEncryptedKeys !== null);
 
     // Step 2: try server key-bundle (cross-device sync)
+    let serverQueryExecutedSuccessfully = false;
+    let serverKeyBundleExists = false;
+
     if (!currentKeys) {
       try {
         if (onStatusUpdate) onStatusUpdate('Syncing keys from cloud...');
@@ -325,7 +345,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const bundleRes = await fetch(bundleUrl, {
           headers: { 'Authorization': 'Bearer ' + data.accessToken },
         });
+        
         if (bundleRes.ok) {
+          serverQueryExecutedSuccessfully = true;
+          serverKeyBundleExists = true;
           console.log('🔑 [AuthContext] Successfully retrieved wrapped key from backend. Decrypting...');
           const bundleData = await bundleRes.json();
           try {
@@ -334,23 +357,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             console.log('🔑 [AuthContext] Successfully decrypted server key bundle.');
           } catch (decryptErr) {
             console.error('🚨 [AuthContext] Server key bundle decryption failed! Integrity violation detected.');
+            await setSecureItemAsync('user', JSON.stringify(data));
+            await setSecureItemAsync('session_pwd', password);
+            setUser(data);
+            setMasterKey(derivedKey);
             throw new Error('CRYPTOGRAPHIC_INTEGRITY_ERROR');
           }
+        } else if (bundleRes.status === 404) {
+          serverQueryExecutedSuccessfully = true;
+          serverKeyBundleExists = false;
+          console.log('🔑 [AuthContext] Server returned 404. No key bundle exists for this account on the remote server.');
         } else {
-          console.warn(`⚠️ [AuthContext] Server key bundle response returned status: ${bundleRes.status}`);
+          console.error(`🚨 [AuthContext] Server key bundle returned status: ${bundleRes.status}. Aborting key restoration.`);
+          throw new Error('SERVER_SYNC_ERROR');
         }
       } catch (e: any) {
-        if (e.message === 'CRYPTOGRAPHIC_INTEGRITY_ERROR') {
-          throw e; // Bubble it up to the login view
+        if (e.message === 'CRYPTOGRAPHIC_INTEGRITY_ERROR' || e.message === 'SERVER_SYNC_ERROR') {
+          throw e; // Bubble it up to halt the login view
         }
-        console.warn('⚠️ [AuthContext] Server key bundle query failed or keys missing:', e);
+        console.error('🚨 [AuthContext] Server key bundle query failed due to network or server error:', e);
+        throw new Error('NETWORK_SYNC_ERROR');
       }
     }
+
 
     // Step 3: generate fresh keys if none exist
     if (!currentKeys) {
       if (localKeysFound) {
         console.error('🚨 [AuthContext] Local keys were found but decryption failed, and no valid server keys decrypted.');
+        await setSecureItemAsync('user', JSON.stringify(data));
+        await setSecureItemAsync('session_pwd', password);
+        setUser(data);
+        setMasterKey(derivedKey);
         throw new Error('CRYPTOGRAPHIC_INTEGRITY_ERROR');
       }
 
@@ -400,8 +438,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const masterKeyBase64 = Buffer.from(derivedKey).toString('base64');
         await setSecureItemAsync('prama_master_key', masterKeyBase64);
         console.log('🔑 [AuthContext] IdentityManager SecureStore slots synced.');
+
+        // 🔑 Save active private key and its fingerprint to the E2EE key history store
+        const fingerprint = computeSHA256Fingerprint(currentKeys.publicKey);
+        console.log(`🔑 [AuthContext] Storing active E2EE key to SQLite local_key_history: ${fingerprint}`);
+        await saveLocalKey(fingerprint, currentKeys.privateKey);
       } catch (e) {
-        console.error('❌ [AuthContext] Failed to save keys to IdentityManager SecureStore slots:', e);
+        console.error('❌ [AuthContext] Failed to save keys to IdentityManager SecureStore slots / SQLite:', e);
       }
     }
 
@@ -646,6 +689,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await setSecureItemAsync('prama_public_key', generated.publicKey);
     const masterKeyBase64 = Buffer.from(derivedKey).toString('base64');
     await setSecureItemAsync('prama_master_key', masterKeyBase64);
+
+    // Save newly generated key pair to the E2EE key history store
+    try {
+      const fingerprint = computeSHA256Fingerprint(generated.publicKey);
+      console.log(`🔑 [AuthContext] Reset: Storing E2EE key to SQLite local_key_history: ${fingerprint}`);
+      await saveLocalKey(fingerprint, generated.privateKey);
+    } catch (e) {
+      console.error('❌ [AuthContext] Reset: Failed to save E2EE key to SQLite:', e);
+    }
 
     // Upload bundle
     await fetch(`${API_BASE_URL}/api/v1/users/key-bundle`, {

@@ -87,9 +87,12 @@ export interface LocalMessageRecord {
 }
 
 // 1. Initialize Tables in the Shared Database File
+let localTableInitialized = false;
 export const initLocalMessagesTable = async (): Promise<SQLite.SQLiteDatabase> => {
   const db = await initGroupSessionDB(); // Re-use connection to shared database file
   await initSecureKeys();
+
+  if (localTableInitialized) return db;
 
   // Create local_messages (De-correlated Auto-Increment Primary Key)
   await db.execAsync(`
@@ -116,11 +119,21 @@ export const initLocalMessagesTable = async (): Promise<SQLite.SQLiteDatabase> =
     );
   `);
 
+  // Create local_key_history (E2EE Rotated Keys Dictionary)
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS local_key_history (
+      fingerprint TEXT PRIMARY KEY,
+      private_key_pem TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+
   // Create high-performance indexes
   await db.execAsync('CREATE INDEX IF NOT EXISTS idx_messages_chat ON local_messages(chat_id);');
   await db.execAsync('CREATE INDEX IF NOT EXISTS idx_messages_server_hash ON local_messages(server_message_hash);');
   await db.execAsync('CREATE INDEX IF NOT EXISTS idx_blind_word ON message_blind_indexes(word_hash);');
 
+  localTableInitialized = true;
   return db;
 };
 
@@ -283,3 +296,37 @@ export const searchLocalMessages = async (chatId: string, searchWord: string): P
 
   return decryptedRecords;
 };
+
+// 5. Store Private Key History by its fingerprint
+export const saveLocalKey = async (fingerprint: string, privateKeyPem: string): Promise<void> => {
+  const db = await initLocalMessagesTable();
+  await db.runAsync(
+    'INSERT OR IGNORE INTO local_key_history (fingerprint, private_key_pem, created_at) VALUES (?, ?, ?)',
+    [fingerprint, privateKeyPem, Date.now()]
+  );
+};
+
+// 6. Fetch single Private Key by fingerprint
+export const getLocalKey = async (fingerprint: string): Promise<string | null> => {
+  const db = await initLocalMessagesTable();
+  const row = await db.getFirstAsync<{ private_key_pem: string }>(
+    'SELECT private_key_pem FROM local_key_history WHERE fingerprint = ?',
+    [fingerprint]
+  );
+  return row ? row.private_key_pem : null;
+};
+
+// 7. Load all historical keys into an in-memory dictionary Map for fast lookup
+export const getLocalKeyHistoryStore = async (): Promise<Map<string, string>> => {
+  const db = await initLocalMessagesTable();
+  const rows = await db.getAllAsync<{ fingerprint: string, private_key_pem: string }>(
+    'SELECT fingerprint, private_key_pem FROM local_key_history'
+  );
+  
+  const store = new Map<string, string>();
+  for (const row of rows) {
+    store.set(row.fingerprint, row.private_key_pem);
+  }
+  return store;
+};
+
