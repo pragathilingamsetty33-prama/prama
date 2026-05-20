@@ -27,26 +27,19 @@ export const generateRSAKeyPair = async () => {
     return { publicKey: publicKeyPem, privateKey: privateKeyPem };
 };
 
-/**
- * Derives a 256-bit symmetric MasterKey from the user's password and UUID salt.
- * Standardizes the salt to a pure hex string to eliminate cross-platform string marshaling gaps.
- */
 export const deriveKeyFromPassword = async (password, userId) => {
     if (!password || !userId) {
         throw new Error("Missing parameters for key derivation.");
     }
 
-    // Surgical Fix: Strip hyphens to create a clean, uniform hex representation of the UUID
-    const standardizedSaltHex = userId.replace(/-/g, '').toLowerCase();
-
-    // Convert the hex string into a Uint8Array to ensure byte-perfect alignment with native engines
-    const saltBytes = new Uint8Array(
-        standardizedSaltHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
-    );
+    // Cross-Platform Uniformity Fix: Use pure string bytes (UTF-8) 
+    // to guarantee identical JNI marshaling in React Native.
+    const encoder = new TextEncoder();
+    const saltBytes = encoder.encode(userId.toLowerCase());
 
     const hashResult = await argon2id({
         password: password,
-        salt: saltBytes, // Explicit byte array input avoids internal string encoding discrepancies
+        salt: saltBytes,
         iterations: 3,
         memorySize: 65536,
         parallelism: 4,

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { Stomp } from '@stomp/stompjs';
-import { Search, Send, ShieldCheck, Shield, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward, Cloud } from 'lucide-react';
+import { Search, Send, ShieldCheck, Shield, LogOut, User as UserIcon, UserPlus, Check, Users, Bell, Paperclip, File as FileIcon, Download, Image as ImageIcon, Loader, Camera, X, Forward } from 'lucide-react';
 import { encryptAESKeyWithRSA, generateAESKey, encryptMessageWithAES, decryptAESKeyWithRSA, decryptMessageWithAES, encryptFileWithAES, decryptFileWithAES, deriveKeyFromPassword, encryptDataWithPassword, encryptChunkWithAESGCM, decryptChunkWithAESGCM, decryptGroupMessageMegolm, enqueueGroupDecryption } from '../utils/crypto';
 import { saveChunkToIndexedDB, getFileChunksFromIndexedDB, wipeFileChunksFromIndexedDB } from '../utils/storageVault';
 import { KeyCache } from '../utils/KeyCache';
@@ -392,6 +392,9 @@ const Chat = () => {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [selectedImage, setSelectedImage] = useState(null);
+    const [showMnemonicBackup, setShowMnemonicBackup] = useState(null); // holds the mnemonic string when open
+    const [mnemonicCopied, setMnemonicCopied] = useState(false);
+
     const fileInputRef = useRef(null);
     const [showCamera, setShowCamera] = useState(false);
     const videoRef = useRef(null);
@@ -1063,9 +1066,9 @@ const Chat = () => {
 
                             // --- PERSISTENT CACHE CHECK ---
                             if (attachment && m.id) {
-                                const cachedBlob = await getCachedFile(m.id);
+                                const cachedBlob = await getCachedFile(String(m.id));
                                 if (cachedBlob) {
-                                    cachedUrls[m.id] = URL.createObjectURL(cachedBlob);
+                                    cachedUrls[String(m.id)] = URL.createObjectURL(cachedBlob);
                                 }
                             }
 
@@ -2239,7 +2242,42 @@ const Chat = () => {
     return (
         <div style={{ display: 'flex', width: '100%', maxWidth: '1200px', height: '85vh', margin: '0 auto', padding: '20px', gap: '20px' }}>
 
-            {/* Sidebar */}
+            {/* 🔑 Recovery Phrase Backup Modal */}
+            {showMnemonicBackup && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.88)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+                    <div style={{ background: '#0d1117', border: '1px solid rgba(102,252,241,0.3)', borderRadius: '16px', padding: '36px', maxWidth: '500px', width: '100%', boxShadow: '0 0 40px rgba(102,252,241,0.15)' }}>
+                        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+                            <div style={{ fontSize: '40px', marginBottom: '10px' }}>🔑</div>
+                            <h2 style={{ color: '#66fcf1', margin: '0 0 8px', fontSize: '22px', fontWeight: 'bold' }}>Your Recovery Phrase</h2>
+                            <p style={{ color: '#ffcc00', fontSize: '13px', margin: 0, fontWeight: '600' }}>
+                                Keep this safe. Anyone with these words can recover your identity.
+                            </p>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '20px' }}>
+                            {showMnemonicBackup.split(' ').map((word, i) => (
+                                <div key={i} style={{ background: 'rgba(102,252,241,0.07)', border: '1px solid rgba(102,252,241,0.2)', borderRadius: '8px', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ color: '#45a29e', fontSize: '11px', minWidth: '18px', fontWeight: 'bold' }}>{i + 1}.</span>
+                                    <span style={{ color: '#e0e0e0', fontSize: '14px', fontWeight: '600', fontFamily: 'monospace' }}>{word}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <button
+                            onClick={() => { navigator.clipboard.writeText(showMnemonicBackup); setMnemonicCopied(true); setTimeout(() => setMnemonicCopied(false), 2000); }}
+                            style={{ width: '100%', padding: '10px', marginBottom: '12px', background: mnemonicCopied ? 'rgba(0,255,136,0.15)' : 'rgba(102,252,241,0.1)', border: `1px solid ${mnemonicCopied ? '#00ff88' : 'rgba(102,252,241,0.3)'}`, borderRadius: '8px', color: mnemonicCopied ? '#00ff88' : '#66fcf1', cursor: 'pointer', fontSize: '14px', fontWeight: '600', transition: 'all 0.2s' }}
+                        >
+                            {mnemonicCopied ? '✅ Copied!' : '📋 Copy All 12 Words'}
+                        </button>
+                        <button
+                            onClick={() => setShowMnemonicBackup(null)}
+                            style={{ width: '100%', padding: '10px', background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.3)', borderRadius: '8px', color: '#ff6b6b', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            )}
+
+
             <div className="glass-panel" style={{ width: '350px', display: 'flex', flexDirection: 'column', padding: '20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '30px' }}>
                     <ShieldCheck color="var(--text-highlight)" size={28} />
@@ -2490,12 +2528,10 @@ const Chat = () => {
                         }} />
                         {status}
                     </div>
-                    <button onClick={() => syncVaultVersionEpoch(2, 'ROUTINE')} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(102, 252, 241, 0.1)', color: '#66fcf1', marginBottom: '10px' }}>
-                        <Cloud size={18} /> Sync Cloud Keys
-                    </button>
                     <button onClick={() => { logout(); purgePramaCache(); navigate('/'); }} className="glass-button" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: 'rgba(255,107,107,0.1)', color: '#ff6b6b' }}>
                         <LogOut size={18} /> Logout
                     </button>
+
                 </div>
             </div>
 
@@ -3382,7 +3418,7 @@ const Chat = () => {
                             onKeyPress={e => e.key === 'Enter' && sendMessage()}
                             disabled={!(activeFriend || activeGroup) || isUploading}
                         />
-                        <button onClick={sendMessage} className="glass-button" disabled={!(activeFriend || activeGroup) || isUploading || (!inputMsg.trim() && !selectedFile)}>
+                        <button onClick={sendMessage} className="glass-button" disabled={!(activeFriend || activeGroup) || isUploading || (!inputMsg.trim() && !selectedFile && !editingMessage)}>
                             {isUploading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                     <Loader className="spin" size={16} />

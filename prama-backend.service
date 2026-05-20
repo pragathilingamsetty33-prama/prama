@@ -1,0 +1,18 @@
+[Unit]
+Description=Prama Messaging Backend Service
+After=network.target
+
+[Service]
+User=azureuser
+WorkingDirectory=/home/azureuser/backend
+EnvironmentFile=/home/azureuser/backend/.env
+ExecStart=/usr/bin/java -jar /home/azureuser/backend/app.jar
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=prama-backend
+
+[Install]
+WantedBy=multi-user.target

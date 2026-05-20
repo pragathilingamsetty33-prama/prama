@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { generateRSAKeyPair, deriveKeyFromPassword, encryptDataWithPassword, decryptDataWithPassword } from '../utils/crypto';
 import { saveVersionedKeysWeb, recoverLatestValidKeyWeb, initVaultDB, runBootGarbageCollector } from '../utils/storageVault';
 import { requestForToken } from '../firebase';
+import { MnemonicManager } from '../utils/MnemonicManager';
 
 
 const AuthContext = createContext();
@@ -102,7 +103,12 @@ export const AuthProvider = ({ children }) => {
             body: JSON.stringify({ identifier, password })
         });
 
-        if (!res.ok) throw new Error('Login failed');
+        if (!res.ok) {
+            if (res.status === 401) throw new Error('Invalid email/username or password');
+            if (res.status === 403) throw new Error('Account is locked or disabled');
+            if (res.status === 429) throw new Error('Too many login attempts. Please try again later');
+            throw new Error('Login failed. Please try again');
+        }
         const data = await res.json();
 
         let currentKeys = null;
@@ -201,7 +207,12 @@ export const AuthProvider = ({ children }) => {
             throw new Error(errText || 'Registration failed');
         }
 
-        return true;
+        // Generate a 12-word BIP-39 mnemonic recovery phrase for this account
+        const mnemonic = MnemonicManager.generateMnemonic();
+        // Store it locally keyed by username so it survives across sessions
+        localStorage.setItem(`prama_mnemonic_${username.toLowerCase()}`, mnemonic);
+
+        return { success: true, mnemonic };
     };
 
     const resetIdentity = async (password) => {

@@ -59,3 +59,6 @@ cors.json
 search_results.txt
 prama_dashboard_mockup.png
 deploy.ps1
+*.apk
+    # Unignore example env files
+    !.env.example

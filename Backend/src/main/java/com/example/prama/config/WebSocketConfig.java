@@ -39,17 +39,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
-        // Upgrade from SimpleBroker to StompBrokerRelay for RabbitMQ
-        registry.enableStompBrokerRelay("/topic", "/queue")
-                .setRelayHost(rabbitHost)
-                .setRelayPort(61613) // Default STOMP port for RabbitMQ
-                .setClientLogin(rabbitUser)
-                .setClientPasscode(rabbitPass)
-                .setSystemLogin(rabbitUser)
-                .setSystemPasscode(rabbitPass)
-                .setSystemHeartbeatSendInterval(10000)
-                .setSystemHeartbeatReceiveInterval(10000)
-                .setVirtualHost(rabbitVirtualHost);
+        // Use Spring's built-in in-memory broker instead of external RabbitMQ
+        registry.enableSimpleBroker("/topic", "/queue");
 
         registry.setApplicationDestinationPrefixes("/app");
         registry.setUserDestinationPrefix("/user");
