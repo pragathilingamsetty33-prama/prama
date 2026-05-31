@@ -32,20 +32,6 @@ Prama is a fully functional, zero‑knowledge, end‑to‑end encrypted (E2EE) w
 
 ---
 
-## 🧪 Live Demo Instructions
-
-1. Open **two separate** browser windows (or one normal + one incognito).
-2. Navigate to the live demo URL (e.g. `https://prama.duckdns.org`).
-3. Log in on **Window A**:
-   - **Email:** `alice@demo.com`
-   - **Password:** `Demo123!`
-4. Log in on **Window B**:
-   - **Email:** `bob@demo.com`
-   - **Password:** `Demo123!`
-5. Start a chat – messages appear instantly and remain encrypted end‑to‑end.
-
----
-
 ## 🛠️ Local Setup & Deployment
 
 ### Prerequisites
