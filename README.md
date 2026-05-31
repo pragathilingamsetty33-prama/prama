@@ -125,7 +125,7 @@ Feel free to open issues or submit pull requests. Please adhere to the following
 ---
 
 ## Working
-[![](image_f68eff.png)](Prama.mp4)
+![Prama Demo](Prama.gif)
 
 ---
 
