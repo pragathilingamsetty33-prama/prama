@@ -125,7 +125,8 @@ Feel free to open issues or submit pull requests. Please adhere to the following
 ---
 
 ## Working
-![Prama Demo](Prama.gif)
+
+https://github.com/user-attachments/assets/f7f2505a-261e-49cf-9100-5a6fdd733272
 
 ---
 
