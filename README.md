@@ -1,6 +1,6 @@
 # Prama – End‑to‑End Encrypted Collaboration Platform
 
-> **Enterprise‑Grade Web Collaboration & End‑to‑End Encrypted Session Management Platform**
+> **Enterprise‑Grade Web Collaboration & End‑to‑End Encrypted Session Management Platform** 
 
 ---
 
